@@ -42,23 +42,24 @@ def seed_new_tickers(conn):
 
 
 def get_candidates(conn, limit: int):
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT s.ticker, s.last_fetched_date, s.retry_count
-            FROM ingestion_state s
-            JOIN universe u ON u.ticker = s.ticker AND u.is_active = TRUE
-            WHERE s.data_type = 'price'
-              AND (
-                    (s.fetch_status IN ('pending', 'failed') AND s.retry_count < %s)
-                 OR (s.fetch_status = 'complete' AND s.last_fetched_date < CURRENT_DATE - INTERVAL '1 day')
-              )
-            ORDER BY s.priority_rank ASC, s.last_attempt_at ASC NULLS FIRST
-            LIMIT %s
-            """,
-            (MAX_RETRY_COUNT, limit),
-        )
-        return cur.fetchall()
+    with conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT s.ticker, s.last_fetched_date, s.retry_count
+                FROM ingestion_state s
+                JOIN universe u ON u.ticker = s.ticker AND u.is_active = TRUE
+                WHERE s.data_type = 'price'
+                  AND (
+                        (s.fetch_status IN ('pending', 'failed') AND s.retry_count < %s)
+                     OR (s.fetch_status = 'complete' AND s.last_fetched_date < CURRENT_DATE - INTERVAL '1 day')
+                  )
+                ORDER BY s.priority_rank ASC, s.last_attempt_at ASC NULLS FIRST
+                LIMIT %s
+                """,
+                (MAX_RETRY_COUNT, limit),
+            )
+            return cur.fetchall()
 
 
 def upsert_price_bars(conn, bars):

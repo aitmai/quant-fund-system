@@ -55,6 +55,19 @@ class JobRun:
             joined = " | ".join(self._notes)
             error_message = f"{error_message} | notes: {joined}" if error_message else f"notes: {joined}"
 
+        # Defensive: if the exception we're logging left the connection's
+        # transaction in a failed state (any earlier statement that wasn't
+        # itself wrapped in `with conn:`), the UPDATE below would raise
+        # InFailedSqlTransaction and that NEW exception would replace the
+        # real one in what the caller sees — silently turning a specific,
+        # diagnosable error into a generic "transaction is aborted"
+        # message. Roll back first, unconditionally, so logging the
+        # failure can never itself mask the failure.
+        try:
+            self.conn.rollback()
+        except Exception:
+            pass
+
         with self.conn:
             with self.conn.cursor() as cur:
                 cur.execute(

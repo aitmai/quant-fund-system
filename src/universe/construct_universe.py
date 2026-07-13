@@ -61,9 +61,10 @@ def sync_index_universe(
     fetched = _fetch_selected_sources(include_sp500, include_russell1000)
     fetched_tickers: Set[str] = set(fetched.keys())
 
-    with conn.cursor() as cur:
-        cur.execute("SELECT ticker FROM universe WHERE source = 'auto' AND is_active = TRUE")
-        current_auto_tickers: Set[str] = {row[0] for row in cur.fetchall()}
+    with conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT ticker FROM universe WHERE source = 'auto' AND is_active = TRUE")
+            current_auto_tickers: Set[str] = {row[0] for row in cur.fetchall()}
 
     to_add = fetched_tickers - current_auto_tickers
     to_remove = current_auto_tickers - fetched_tickers
@@ -159,18 +160,19 @@ def apply_liquidity_filters(
     time to populate price_history.
     """
     today = date.today()
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT ticker, AVG(close * volume) AS avg_dollar_vol, COUNT(*) AS n
-            FROM price_history
-            WHERE date >= CURRENT_DATE - INTERVAL '%s days'
-            GROUP BY ticker
-            HAVING COUNT(*) >= %s
-            """,
-            (lookback_days, lookback_days // 2),  # tolerate some missing trading days
-        )
-        volumes = {row[0]: float(row[1]) for row in cur.fetchall() if row[1] is not None}
+    with conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT ticker, AVG(close * volume) AS avg_dollar_vol, COUNT(*) AS n
+                FROM price_history
+                WHERE date >= CURRENT_DATE - INTERVAL '%s days'
+                GROUP BY ticker
+                HAVING COUNT(*) >= %s
+                """,
+                (lookback_days, lookback_days // 2),  # tolerate some missing trading days
+            )
+            volumes = {row[0]: float(row[1]) for row in cur.fetchall() if row[1] is not None}
 
     deactivated = []
     with conn:

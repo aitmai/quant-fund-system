@@ -14,15 +14,16 @@ from typing import Optional, Tuple
 
 
 def get_config(conn, data_type: str) -> dict:
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT daily_budget, calls_per_ticker, monthly_bandwidth_cap_mb, active_provider
-            FROM ingestion_config WHERE data_type = %s
-            """,
-            (data_type,),
-        )
-        row = cur.fetchone()
+    with conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT daily_budget, calls_per_ticker, monthly_bandwidth_cap_mb, active_provider
+                FROM ingestion_config WHERE data_type = %s
+                """,
+                (data_type,),
+            )
+            row = cur.fetchone()
     if not row:
         raise RuntimeError(
             f"No ingestion_config row for data_type='{data_type}'. "
@@ -38,27 +39,29 @@ def get_config(conn, data_type: str) -> dict:
 
 def get_calls_used_today(conn, data_type: str, today: Optional[date] = None) -> int:
     today = today or date.today()
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT calls_used FROM ingestion_daily_usage WHERE data_type = %s AND usage_date = %s",
-            (data_type, today),
-        )
-        row = cur.fetchone()
+    with conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT calls_used FROM ingestion_daily_usage WHERE data_type = %s AND usage_date = %s",
+                (data_type, today),
+            )
+            row = cur.fetchone()
     return row[0] if row else 0
 
 
 def get_rolling_30day_bandwidth_mb(conn, data_type: str, today: Optional[date] = None) -> float:
     today = today or date.today()
     window_start = today - timedelta(days=30)
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT COALESCE(SUM(bandwidth_used_mb), 0) FROM ingestion_daily_usage
-            WHERE data_type = %s AND usage_date >= %s AND usage_date <= %s
-            """,
-            (data_type, window_start, today),
-        )
-        row = cur.fetchone()
+    with conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COALESCE(SUM(bandwidth_used_mb), 0) FROM ingestion_daily_usage
+                WHERE data_type = %s AND usage_date >= %s AND usage_date <= %s
+                """,
+                (data_type, window_start, today),
+            )
+            row = cur.fetchone()
     return float(row[0]) if row else 0.0
 
 

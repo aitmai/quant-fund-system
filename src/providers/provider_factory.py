@@ -29,11 +29,12 @@ def get_active_provider_name(conn) -> str:
     """Read the currently configured price provider from ingestion_config.
     Falls back to 'yfinance' (no key required) if the row is somehow missing,
     so ingestion never hard-fails just because config wasn't seeded."""
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT active_provider FROM ingestion_config WHERE data_type = 'price'"
-        )
-        row = cur.fetchone()
+    with conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT active_provider FROM ingestion_config WHERE data_type = 'price'"
+            )
+            row = cur.fetchone()
     if row and row[0]:
         return row[0]
     return "yfinance"
