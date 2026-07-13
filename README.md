@@ -16,17 +16,18 @@ end to end.
 |---|---|
 | `migrations/001_initial_schema.sql` | Every table from DESIGN.md §6, run once against Supabase |
 | `migrations/002_phase1_ingestion.sql` | Phase 1 additions: provider selection, per-ticker provider audit, daily usage ledger |
+| `migrations/003_sec_edgar_fundamentals.sql` | `universe.cik` column (for EDGAR lookups) + updated fundamentals budget config for the EDGAR provider swap |
 | `scripts/test_connection.py` | Phase 0 milestone script — proves DB connectivity |
 | `scripts/run_universe_sync.py` | Phase 1: index constituent diffing (S&P 500 / Russell 1000) → `universe` |
 | `scripts/upload_manual_tickers.py` | Phase 1: manual ticker list upload → `universe` |
 | `scripts/run_ingestion_cron.py` | Phase 1: daily price + fundamentals backfill/maintenance |
-| `src/providers/` | Price providers (Tiingo, yfinance) behind a shared interface + automatic fallback; FMP fundamentals client |
+| `src/providers/` | Price providers (Tiingo, yfinance) behind a shared interface + automatic fallback; SEC EDGAR fundamentals client |
 | `src/universe/` | Index constituent sources + diffing/upload/liquidity-filter logic |
 | `src/ingestion/` | Backfill-then-maintenance orchestration + daily/rolling-30-day budget tracking |
 | `.github/workflows/hello_world.yml` | Runs the Phase 0 milestone on GitHub Actions |
 | `.github/workflows/keepalive.yml` | Monthly commit preventing GitHub's 60-day scheduled-workflow disable (fix #1) |
 | `.github/workflows/price_ingestion_cron.yml` | Daily price ingestion cron (scheduled — validated, provider fallback + request pacing in place) |
-| `.github/workflows/fundamentals_ingestion_cron.yml` | Fundamentals ingestion cron (manual-trigger-only until FMP field-name mapping is confirmed live) |
+| `.github/workflows/fundamentals_ingestion_cron.yml` | Fundamentals ingestion cron (manual-trigger-only until the SEC EDGAR provider is validated live) |
 | `.github/workflows/universe_sync.yml` | Monthly universe reconciliation cron |
 | `requirements.txt` | Pinned exact versions (fix #6 — reproducibility across a multi-week backtest) |
 | `.env.example` | Every environment variable this system needs |
@@ -49,6 +50,27 @@ Default: `yfinance` (no API key needed). Switch to Tiingo by setting
 ```sql
 UPDATE ingestion_config SET active_provider = 'tiingo' WHERE data_type = 'price';
 ```
+
+## Fundamentals data provider
+
+Fundamentals ingestion (`src/providers/sec_edgar_provider.py`) uses **SEC
+EDGAR's free XBRL API** — no key, no plan tiers, ever. This replaced FMP
+(2026-07-13) after FMP's free tier turned out to plan-gate `ratios`,
+`key-metrics`, *and* `income-statement` for essentially every S&P 500
+ticker, confirmed via live 402 responses.
+
+The tradeoff: EDGAR hands you raw filed numbers (net income, total
+liabilities, shares outstanding, etc.), not pre-computed ratios — ROE,
+debt/equity, EV/EBITDA, and FCF yield are all computed from those raw
+XBRL facts in code, with the same defensive multi-candidate-tag handling
+used elsewhere in this codebase for exactly the reason XBRL tagging is
+inconsistent company-to-company. Needs `universe.cik` (SEC's Central
+Index Key), which is captured automatically during S&P 500 universe sync
+from Wikipedia's constituents table — no separate lookup step required.
+
+Set `SEC_EDGAR_USER_AGENT` in `.env` (a descriptive string identifying
+who's making requests — SEC's fair-access policy, not optional; requests
+without one commonly get a 403). No other configuration needed.
 
 ## Build sequence
 

@@ -31,6 +31,56 @@ def _fake_ishares_csv(ticker_rows):
 
 class TestSp500WikipediaSource(unittest.TestCase):
     @patch("src.universe.index_sources.requests.get")
+    def test_extracts_and_pads_cik(self, mock_get):
+        rows_html = """
+        <tr><td>AAPL</td><td>Apple Inc.</td><td>Information Technology</td>
+            <td>x</td><td>x</td><td>x</td><td>320193</td></tr>
+        """
+        mock_resp = MagicMock()
+        mock_resp.text = _fake_wikipedia_html(rows_html)
+        mock_resp.raise_for_status.return_value = None
+        mock_get.return_value = mock_resp
+
+        results = index_sources.fetch_sp500_constituents()
+        # Real Wikipedia CIKs already come zero-padded (e.g. "0000320193"),
+        # but pad defensively regardless of what's in the cell.
+        self.assertEqual(results[0]["cik"], "0000320193")
+
+    @patch("src.universe.index_sources.requests.get")
+    def test_already_padded_cik_stays_padded(self, mock_get):
+        rows_html = """
+        <tr><td>AAPL</td><td>Apple Inc.</td><td>Information Technology</td>
+            <td>x</td><td>x</td><td>x</td><td>0000320193</td></tr>
+        """
+        mock_resp = MagicMock()
+        mock_resp.text = _fake_wikipedia_html(rows_html)
+        mock_resp.raise_for_status.return_value = None
+        mock_get.return_value = mock_resp
+
+        results = index_sources.fetch_sp500_constituents()
+        self.assertEqual(results[0]["cik"], "0000320193")
+
+    @patch("src.universe.index_sources.requests.get")
+    def test_missing_cik_column_gives_none_not_error(self, mock_get):
+        # Table without a CIK column at all — shouldn't blow up.
+        html = """
+        <html><body>
+        <table class="wikitable sortable" id="constituents">
+        <tr><th>Symbol</th><th>Security</th><th>GICS Sector</th></tr>
+        <tr><td>AAPL</td><td>Apple Inc.</td><td>Tech</td></tr>
+        </table>
+        </body></html>
+        """
+        mock_resp = MagicMock()
+        mock_resp.text = html
+        mock_resp.raise_for_status.return_value = None
+        mock_get.return_value = mock_resp
+
+        results = index_sources.fetch_sp500_constituents()
+        self.assertIsNone(results[0]["cik"])
+
+
+    @patch("src.universe.index_sources.requests.get")
     def test_parses_constituents_table(self, mock_get):
         rows_html = """
         <tr><td>AAPL</td><td>Apple Inc.</td><td>Information Technology</td>

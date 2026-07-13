@@ -17,7 +17,10 @@ Index constituent sources (DESIGN.md §3 Stage 1, §6.1).
     (scripts/upload_manual_tickers.py) is the practical way to extend past
     S&P 500 for now.
 
-Each function returns a list of dicts: {ticker, company_name, sector}.
+Each function returns a list of dicts: {ticker, company_name, sector, cik}.
+`cik` (SEC's Central Index Key, 10-digit zero-padded) is only populated
+for the Wikipedia S&P 500 source — it's already a column in that table.
+Needed for SEC EDGAR fundamentals lookups (src/providers/sec_edgar_provider.py).
 Market cap / avg dollar volume filtering happens downstream in
 construct_universe.py, once price_history exists to compute avg dollar
 volume from (a fresh constituent list has no volume history yet on day one).
@@ -69,6 +72,7 @@ _NON_EQUITY_TICKERS = {"-", "CASH"}
 _SYMBOL_HEADER_CANDIDATES = ("symbol", "ticker symbol", "ticker")
 _NAME_HEADER_CANDIDATES = ("security", "company", "name")
 _SECTOR_HEADER_CANDIDATES = ("gics sector",)  # deliberately NOT "gics sub-industry"
+_CIK_HEADER_CANDIDATES = ("cik",)  # SEC's Central Index Key — needed for EDGAR lookups
 
 
 def fetch_sp500_constituents() -> List[Dict]:
@@ -124,6 +128,7 @@ def _parse_wikipedia_constituents_table(table) -> List[Dict]:
     symbol_idx = _find_header_index(headers, _SYMBOL_HEADER_CANDIDATES)
     name_idx = _find_header_index(headers, _NAME_HEADER_CANDIDATES)
     sector_idx = _find_header_index(headers, _SECTOR_HEADER_CANDIDATES)
+    cik_idx = _find_header_index(headers, _CIK_HEADER_CANDIDATES)
 
     if symbol_idx is None:
         return []
@@ -141,11 +146,23 @@ def _parse_wikipedia_constituents_table(table) -> List[Dict]:
         # providers (BRK-B), since that's what price/fundamentals lookups
         # downstream expect. If a ticker legitimately has no dot, this is a no-op.
         ticker = ticker.replace(".", "-")
+
+        cik = None
+        if cik_idx is not None and len(cells) > cik_idx:
+            raw_cik = cells[cik_idx].get_text(strip=True)
+            if raw_cik.isdigit():
+                # SEC's EDGAR API expects 10-digit zero-padded CIKs
+                # (CIK0000320193.json) — normalize here once so every
+                # downstream consumer (sec_edgar_provider.py) can assume
+                # this shape rather than re-padding defensively everywhere.
+                cik = raw_cik.zfill(10)
+
         results.append(
             {
                 "ticker": ticker,
                 "company_name": cells[name_idx].get_text(strip=True) if name_idx is not None and len(cells) > name_idx else None,
                 "sector": cells[sector_idx].get_text(strip=True) if sector_idx is not None and len(cells) > sector_idx else None,
+                "cik": cik,
             }
         )
     return results

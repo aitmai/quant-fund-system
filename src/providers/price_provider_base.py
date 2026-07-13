@@ -56,3 +56,18 @@ class PriceProvider(ABC):
         unusual) response for a ticker with no bars in range.
         """
         raise NotImplementedError
+
+
+class FundamentalsRow:
+    """Shared output shape for fundamentals providers (FMP, SEC EDGAR).
+    Kept here rather than duplicated in each provider module."""
+
+    def __init__(self, ticker, report_date, filed_date, roe, ev_ebitda, fcf_yield, debt_equity, earnings_variance):
+        self.ticker = ticker
+        self.report_date = report_date
+        self.filed_date = filed_date
+        self.roe = roe
+        self.ev_ebitda = ev_ebitda
+        self.fcf_yield = fcf_yield
+        self.debt_equity = debt_equity
+        self.earnings_variance = earnings_variance

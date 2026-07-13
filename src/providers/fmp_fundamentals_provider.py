@@ -58,7 +58,7 @@ from typing import Dict, List, Optional
 
 import requests
 
-from .price_provider_base import PriceProviderError  # reuse the same exception shape
+from .price_provider_base import FundamentalsRow, PriceProviderError  # reuse the same exception shape
 
 FMP_BASE_URL = "https://financialmodelingprep.com/stable"
 REQUEST_TIMEOUT_SECONDS = 30
@@ -83,18 +83,6 @@ def _looks_like_plan_gated(message: str) -> bool:
         phrase in lowered
         for phrase in ("premium query parameter", "upgrade your plan", "current subscription")
     )
-
-
-class FundamentalsRow:
-    def __init__(self, ticker, report_date, filed_date, roe, ev_ebitda, fcf_yield, debt_equity, earnings_variance):
-        self.ticker = ticker
-        self.report_date = report_date
-        self.filed_date = filed_date
-        self.roe = roe
-        self.ev_ebitda = ev_ebitda
-        self.fcf_yield = fcf_yield
-        self.debt_equity = debt_equity
-        self.earnings_variance = earnings_variance
 
 
 def _first_present(row: dict, *candidate_keys: str):

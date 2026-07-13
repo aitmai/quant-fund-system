@@ -1,19 +1,23 @@
 # Phase 1 daily fundamentals ingestion (DESIGN.md §5, §7).
 #
-# Deliberately workflow_dispatch-only for now, NOT scheduled — fundamentals
-# ingestion has an open question: FMP's 2026 /stable/ API migration appears
-# to have renamed/reshuffled some fields (see the module docstring in
-# src/providers/fmp_fundamentals_provider.py), and that hasn't been
-# confirmed against a live response yet. Trigger this manually, check
-# stderr for any "WARNING: fundamentals field ... was None for ALL"
-# lines, and only add a `schedule:` block (matching price_ingestion_cron.yml)
-# once a run comes back clean.
+# Switched from FMP to SEC EDGAR (2026-07-13) — FMP's free tier turned out
+# to plan-gate ratios, key-metrics, AND income-statement for essentially
+# every S&P 500 ticker (confirmed via live 402s). EDGAR is completely
+# free, no plan tiers, ever — see src/providers/sec_edgar_provider.py's
+# module docstring for the full story and tradeoffs.
+#
+# Deliberately workflow_dispatch-only for now, NOT scheduled — this is a
+# newly-built provider (raw XBRL parsing, computed ratios rather than
+# pre-computed ones) and hasn't been validated against a live run yet.
+# Trigger manually, check stderr for any "WARNING: EDGAR fundamentals
+# field ... was None for ALL" lines, and only add a `schedule:` block
+# (matching price_ingestion_cron.yml) once a run comes back clean.
 name: daily-fundamentals-ingestion
 
 on:
   workflow_dispatch: {}
   # schedule:
-  #   - cron: "45 13 * * *"   # uncomment once field-name mapping is confirmed
+  #   - cron: "45 13 * * *"   # uncomment once EDGAR provider is validated
 
 jobs:
   ingest-fundamentals:
@@ -32,5 +36,5 @@ jobs:
       - name: Run fundamentals ingestion
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+          SEC_EDGAR_USER_AGENT: ${{ secrets.SEC_EDGAR_USER_AGENT }}
         run: python scripts/run_ingestion_cron.py --only fundamentals

@@ -36,7 +36,6 @@ jobs:
       - name: Run universe sync
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
         run: |
           if [ "${{ github.event.inputs.include_russell1000 }}" = "true" ]; then
             python scripts/run_universe_sync.py --include-russell1000 --apply-liquidity-filter

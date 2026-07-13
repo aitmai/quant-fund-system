@@ -30,9 +30,9 @@ Actions compute)
    - `DATABASE_URL`
    - `SUPABASE_URL`
    - `SUPABASE_SERVICE_ROLE_KEY`
-   - `FMP_API_KEY`
    - `FRED_API_KEY`
    - `TIINGO_API_KEY` (optional at this stage — see Phase 1 setup below)
+   - `SEC_EDGAR_USER_AGENT` (needed once you get to Phase 1 fundamentals — see below; harmless to add now)
 
    **Never** put these values in code, workflow YAML, or anything committed —
    workflow logs are public on a public repo (DESIGN.md §8.4).
@@ -64,11 +64,14 @@ the month, or trigger it manually once to confirm it works at all).
 Goal (DESIGN.md §13): `universe`, `price_history`, `fundamentals` populated
 and self-maintaining via the backfill-then-maintenance cron.
 
-### 1. Run the Phase 1 migration
+### 1. Run the Phase 1 migrations
 
-From Supabase's SQL Editor, run `migrations/002_phase1_ingestion.sql` (after
-001, if you haven't already). Adds provider selection, per-ticker provider
-audit, and the daily usage ledger.
+From Supabase's SQL Editor, run `migrations/002_phase1_ingestion.sql` and
+`migrations/003_sec_edgar_fundamentals.sql` in order (after 001, if you
+haven't already). 002 adds provider selection, per-ticker provider audit,
+and the daily usage ledger. 003 adds `universe.cik` (needed for EDGAR
+lookups) and updates the fundamentals budget config for the EDGAR
+provider swap.
 
 ### 2. Add the new secrets
 
@@ -78,9 +81,10 @@ Actions):
   `ingestion_config.active_provider` to `'tiingo'`; the seeded default
   (`'yfinance'`) needs no key, but setting it anyway means automatic fallback
   works if yfinance gets throttled.
-
-(`FMP_API_KEY` is already required from Phase 0 — Phase 1's fundamentals
-ingestion is what actually starts using it.)
+- `SEC_EDGAR_USER_AGENT` — **required** for fundamentals ingestion. A
+  descriptive string identifying who's making requests (SEC's fair-access
+  policy, not optional): `"YourName YourApp your-email@example.com"`.
+  Requests without one commonly get a 403.
 
 ### 3. Build the initial universe
 
@@ -112,13 +116,16 @@ Run these daily until backfill completes. Price is validated and now runs
 on its own schedule (`price_ingestion_cron.yml`) — no more manual runs
 needed once that's confirmed working. Fundamentals stays manual
 (`workflow_dispatch` on `daily-fundamentals-ingestion`) until a run comes
-back with no `WARNING: fundamentals field ... was None for ALL` lines in
-the logs; at that point, uncomment the `schedule:` block in
-`fundamentals_ingestion_cron.yml` to put it on autopilot too. At the
-seeded budgets (400 price calls / 225 fundamentals calls ÷ 3 calls-per-ticker
-= 75 tickers/day), a ~3,000-ticker universe takes about 12 days for
-fundamentals to fully backfill (DESIGN.md §5); price backfill is faster
-since it's one call per ticker regardless of history length.
+back clean (no unexpected errors, and ideally no `WARNING: EDGAR
+fundamentals field ... was None for ALL` lines — a few are expected given
+XBRL tagging inconsistency across companies, but not for every ticker);
+at that point, uncomment the `schedule:` block in
+`fundamentals_ingestion_cron.yml` to put it on autopilot too. EDGAR has no
+daily request cap (just a 10 requests/second pace, handled automatically),
+and one API call per ticker returns a company's entire filing history, so
+backfill for a ~500-ticker universe finishes in minutes, not days —
+dramatically faster than FMP's old 3-calls-per-ticker, daily-budget-capped
+design.
 
 ### 5. Confirm the price ingestion and monthly-universe-sync workflows are scheduled
 

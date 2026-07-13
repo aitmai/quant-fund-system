@@ -76,14 +76,15 @@ def sync_index_universe(
                 info = fetched[ticker]
                 cur.execute(
                     """
-                    INSERT INTO universe (ticker, company_name, sector, exchange, is_active, source, added_date)
-                    VALUES (%s, %s, %s, NULL, TRUE, 'auto', %s)
+                    INSERT INTO universe (ticker, company_name, sector, exchange, is_active, source, added_date, cik)
+                    VALUES (%s, %s, %s, NULL, TRUE, 'auto', %s, %s)
                     ON CONFLICT (ticker) DO UPDATE SET
                         is_active = TRUE, source = 'auto',
                         company_name = COALESCE(EXCLUDED.company_name, universe.company_name),
-                        sector = COALESCE(EXCLUDED.sector, universe.sector)
+                        sector = COALESCE(EXCLUDED.sector, universe.sector),
+                        cik = COALESCE(EXCLUDED.cik, universe.cik)
                     """,
-                    (ticker, info.get("company_name"), info.get("sector"), today),
+                    (ticker, info.get("company_name"), info.get("sector"), today, info.get("cik")),
                 )
                 cur.execute(
                     """
@@ -105,6 +106,19 @@ def sync_index_universe(
                     """,
                     (ticker, today, run_type, "dropped from index constituent list"),
                 )
+
+            # Backfill cik for tickers that already existed before this
+            # column existed (e.g. universe rows synced before the FMP ->
+            # SEC EDGAR fundamentals switch). Only fills where currently
+            # NULL — never overwrites a value that's already there.
+            already_present = fetched_tickers & current_auto_tickers
+            for ticker in already_present:
+                cik = fetched[ticker].get("cik")
+                if cik:
+                    cur.execute(
+                        "UPDATE universe SET cik = %s WHERE ticker = %s AND cik IS NULL",
+                        (cik, ticker),
+                    )
 
     return {"added": len(to_add), "removed": len(to_remove), "total_fetched": len(fetched_tickers)}
 

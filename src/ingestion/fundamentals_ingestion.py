@@ -1,33 +1,46 @@
 """
 Fundamentals ingestion — backfill then maintenance (DESIGN.md §5).
 
+Switched from FMP to SEC EDGAR (2026-07-13) after FMP's free tier turned
+out to plan-gate ratios, key-metrics, AND income-statement for
+essentially every S&P 500 ticker — confirmed via live 402s, not a guess.
+See src/providers/sec_edgar_provider.py's module docstring for the full
+story and the tradeoffs of the swap.
+
 Same backfill-then-maintenance pattern as price_ingestion.py, but:
-  - Single provider (FMP) — no fallback, since it's the only free
-    fundamentals source with the statement-level detail this needs.
-  - calls_per_ticker = 3 (ratios, key-metrics, income-statement), set in
-    migrations/002_phase1_ingestion.sql.
-  - Each successful fetch returns FULL history in one shot (QUARTERS_PER_REQUEST
-    in fmp_fundamentals_provider.py), so "backfill" for a ticker is really
-    just "first successful fetch" — there's no incremental date range to
-    manage like price_history has.
+  - Single provider (EDGAR) — no fallback needed; unlike FMP, there's no
+    plan tier to hit a wall on.
+  - calls_per_ticker = 1 (one companyfacts call returns a company's ENTIRE
+    XBRL history at once — set in migrations/003_sec_edgar_fundamentals.sql).
+  - Needs a CIK per ticker (universe.cik, sourced from Wikipedia's S&P 500
+    table during universe sync) — tickers without one are skipped with a
+    clear message rather than attempted and failed pointlessly.
+  - Pacing (FUNDAMENTALS_REQUEST_DELAY_SECONDS) respects EDGAR's SEC-wide
+    10 requests/second limit, same mechanism as price_ingestion.py's
+    Yahoo-throttling pacing.
   - Maintenance staleness threshold is long (default 80 days) since
     fundamentals only change quarterly.
 """
 
 import os
 import sys
+import time
 from datetime import date, timedelta
 
 from . import budget
-from ..providers.fmp_fundamentals_provider import FMPFundamentalsProvider
 from ..providers.price_provider_base import PriceProviderError
+from ..providers.sec_edgar_provider import SECEdgarProvider
 
 MAX_RETRY_COUNT = 3
 STALENESS_DAYS = int(os.environ.get("FUNDAMENTALS_STALENESS_DAYS", "80"))
-# Same protective pattern as price_ingestion.py's MAX_CONSECUTIVE_FAILURES:
-# if every endpoint turns out to be plan-gated (see fmp_fundamentals_provider.py's
-# circuit breaker), every remaining ticker this run would fail too. Stop
-# early rather than grinding through hundreds of guaranteed failures.
+# EDGAR's real limit is 10 req/sec SEC-wide (not per-key — there's no
+# key). Default here stays comfortably under that with margin, since an
+# IP-level block from the SEC would be a much bigger problem than a slow
+# ingestion run.
+REQUEST_DELAY_SECONDS = float(os.environ.get("FUNDAMENTALS_REQUEST_DELAY_SECONDS", "0.2"))
+# Same protective pattern as price_ingestion.py's MAX_CONSECUTIVE_FAILURES —
+# kept as a safety net even though EDGAR has no plan-tier wall to hit;
+# still useful if EDGAR itself has an outage or starts 429-ing broadly.
 MAX_CONSECUTIVE_FAILURES = int(os.environ.get("FUNDAMENTALS_MAX_CONSECUTIVE_FAILURES", "15"))
 
 
@@ -50,7 +63,7 @@ def get_candidates(conn, limit: int):
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT s.ticker, s.retry_count
+                SELECT s.ticker, s.retry_count, u.cik
                 FROM ingestion_state s
                 JOIN universe u ON u.ticker = s.ticker AND u.is_active = TRUE
                 WHERE s.data_type = 'fundamentals'
@@ -130,7 +143,7 @@ def run(conn, job=None) -> dict:
         return {"processed": 0, "succeeded": 0, "failed": 0, "skipped_reason": reason, "stopped_early_reason": ""}
 
     try:
-        provider = FMPFundamentalsProvider()
+        provider = SECEdgarProvider()
     except PriceProviderError as exc:
         msg = f"Fundamentals ingestion skipped: {exc}"
         print(msg, file=sys.stderr)
@@ -148,16 +161,31 @@ def run(conn, job=None) -> dict:
     today = date.today()
     succeeded = 0
     failed = 0
+    skipped_no_cik = 0
     consecutive_failures = 0
     stopped_early_reason = ""
     cfg = budget.get_config(conn, "fundamentals")
 
-    for ticker, retry_count in candidates:
+    for ticker, retry_count, cik in candidates:
+        if not cik:
+            # A missing CIK means "we don't know how to look this ticker up
+            # on EDGAR yet" — a data-completeness gap for THIS ticker, not
+            # a signal about provider health. Doesn't count toward the
+            # consecutive-failure streak, and costs no API call/budget.
+            print(
+                f"INFO: skipping {ticker} — no CIK on file (only Wikipedia-sourced "
+                f"S&P 500 tickers get one automatically; manually-added tickers need "
+                f"one supplied to look up EDGAR data).",
+                file=sys.stderr,
+            )
+            mark_failure(conn, ticker, retry_count)
+            skipped_no_cik += 1
+            continue
+
         try:
-            rows = provider.fetch_fundamentals(ticker)
+            rows = provider.fetch_fundamentals(ticker, cik, conn=conn)
             upsert_fundamentals_rows(conn, rows)
             mark_success(conn, ticker, today)
-            # 3 calls consumed regardless of how many quarters came back.
             budget.record_usage(conn, "fundamentals", calls=cfg["calls_per_ticker"])
             succeeded += 1
             consecutive_failures = 0
@@ -170,22 +198,29 @@ def run(conn, job=None) -> dict:
 
             if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
                 stopped_early_reason = (
-                    f"{consecutive_failures} consecutive failures — likely all FMP endpoints "
-                    f"plan-gated or otherwise unavailable, not bad tickers. Stopping early; "
-                    f"remaining tickers will retry on the next scheduled run."
+                    f"{consecutive_failures} consecutive failures — possible EDGAR outage "
+                    f"or broad rate-limiting, not bad tickers. Stopping early; remaining "
+                    f"tickers will retry on the next scheduled run."
                 )
                 print(f"WARNING: {stopped_early_reason}", file=sys.stderr)
                 break
 
+        if REQUEST_DELAY_SECONDS > 0:
+            time.sleep(REQUEST_DELAY_SECONDS)
+
     summary = {
-        "processed": succeeded + failed,
+        "processed": succeeded + failed + skipped_no_cik,
         "succeeded": succeeded,
         "failed": failed,
+        "skipped_no_cik": skipped_no_cik,
         "skipped_reason": "",
         "stopped_early_reason": stopped_early_reason,
     }
     if job:
-        job.note(f"processed={summary['processed']} succeeded={succeeded} failed={failed}")
+        job.note(
+            f"processed={summary['processed']} succeeded={succeeded} "
+            f"failed={failed} skipped_no_cik={skipped_no_cik}"
+        )
         if stopped_early_reason:
             job.note(f"stopped_early: {stopped_early_reason}")
     return summary
