@@ -15,6 +15,28 @@ is spent once per ticker (x3 endpoints), not once per ticker-quarter.
 calls_per_ticker=3 is set in migrations/002_phase1_ingestion.sql to keep
 the daily budget math (daily_budget / calls_per_ticker = tickers/day) honest.
 
+KNOWN ISSUE (confirmed 2026-07-13, live run): `ratios` returned HTTP 402
+for essentially every S&P 500 ticker, with two different messages —
+"limit must be between 0 and 5" on some, "this value set for 'symbol' is
+not available under your current subscription" on others. FMP's own plan
+comparison copy says annual fundamentals/ratios are a Starter-plan (paid)
+feature, not part of Basic/free — so this looks like a plan-tier gate,
+not a tunable parameter. Two mitigations here:
+  1. QUARTERS_PER_REQUEST dropped to 5 (the disclosed free-tier cap) —
+     cheap to try, fixes the "limit" flavor of 402 if that's genuinely
+     independent of the plan-tier gate for any tickers.
+  2. Per-endpoint circuit breaker (see _unavailable_endpoints below) —
+     once ANY ticker gets a plan-tier-flavored 402 on a given endpoint,
+     that endpoint is skipped (no HTTP call at all) for every subsequent
+     ticker THIS run. Stops burning quota and log noise on something
+     already known to be blocked, and fetch_fundamentals() now returns
+     whatever partial data succeeded rather than aborting the whole
+     ticker if e.g. income-statement works but ratios doesn't.
+If this keeps happening even after the limit reduction, it means `ratios`
+truly isn't available on the current FMP plan — that's a real plan-upgrade
+decision to make, not something more code can route around, since the
+data has to come from somewhere.
+
 NOTE ON FIELD NAMES: FMP migrated their whole API to this /stable/
 structure in 2026 and reshuffled things along the way — some fields (e.g.
 ROE) appear to have moved from `ratios` into `key-metrics` on some plans,
@@ -23,8 +45,8 @@ of this has been confirmed against a live response with a real API key,
 so roe/debt_equity/ev_ebitda/fcf_yield are each looked up by trying
 several candidate field names across BOTH endpoints (see _first_present),
 and fetch_fundamentals() logs a loud warning (not a silent NULL) if a
-field never matches for a ticker — check stderr/job_runs after the first
-real run and tell me what it prints if so, so the candidate list can be
+field never matches for a ticker — check stderr/job_runs after a clean
+run and tell me what it prints if so, so the candidate list can be
 corrected to the exact names your account actually returns.
 """
 
@@ -40,7 +62,27 @@ from .price_provider_base import PriceProviderError  # reuse the same exception 
 
 FMP_BASE_URL = "https://financialmodelingprep.com/stable"
 REQUEST_TIMEOUT_SECONDS = 30
-QUARTERS_PER_REQUEST = 40  # ~10 years of quarterly history in one call
+QUARTERS_PER_REQUEST = int(os.environ.get("FMP_QUARTERS_PER_REQUEST", "5"))
+
+ENDPOINTS = ("ratios", "key-metrics", "income-statement")
+
+# Module-level, per-process only — a fresh cron run tomorrow starts clean.
+# Mirrors the same pattern used for Tiingo/yfinance rate limits in
+# provider_factory.py.
+_unavailable_endpoints: set = set()
+
+
+def reset_circuit_breaker():
+    """Clears the unavailable-endpoints set. For test isolation."""
+    _unavailable_endpoints.clear()
+
+
+def _looks_like_plan_gated(message: str) -> bool:
+    lowered = message.lower()
+    return any(
+        phrase in lowered
+        for phrase in ("premium query parameter", "upgrade your plan", "current subscription")
+    )
 
 
 class FundamentalsRow:
@@ -58,7 +100,7 @@ class FundamentalsRow:
 def _first_present(row: dict, *candidate_keys: str):
     """Return the value of the first candidate key present with a non-None
     value in `row`. Exists because FMP's stable-API field names for a given
-    metric aren't fully confirmed here — see fetch_fundamentals docstring."""
+    metric aren't fully confirmed here — see module docstring."""
     for key in candidate_keys:
         if row.get(key) is not None:
             return row[key]
@@ -93,6 +135,14 @@ class FMPFundamentalsProvider:
             raise PriceProviderError("FMP_API_KEY is not set. See .env.example.", retryable=False)
 
     def _get(self, path: str, ticker: str) -> list:
+        if path in _unavailable_endpoints:
+            # Already confirmed plan-gated this run — don't waste an HTTP
+            # call (or quota) re-confirming what we already know.
+            raise PriceProviderError(
+                f"Skipping '{path}' for {ticker} — already found unavailable on this plan this run.",
+                retryable=False,
+            )
+
         # FMP's /stable/ endpoints take the ticker as a query param
         # (?symbol=AAPL), not a path segment (/AAPL) like the old
         # /api/v3/ endpoints did — those are now legacy and 403 on the
@@ -106,6 +156,19 @@ class FMPFundamentalsProvider:
 
         if resp.status_code == 429:
             raise PriceProviderError(f"FMP rate limit hit fetching {ticker} ({path})", retryable=True)
+        if resp.status_code == 402:
+            message = resp.text[:300]
+            if _looks_like_plan_gated(message):
+                _unavailable_endpoints.add(path)
+                print(
+                    f"WARNING: FMP endpoint '{path}' looks plan-gated on your current "
+                    f"subscription (confirmed via {ticker}) — skipping it for every "
+                    f"remaining ticker this run rather than repeating the same 402. "
+                    f"This is a real plan-tier limitation, not something a code fix can "
+                    f"route around; check your FMP plan if you need this data.",
+                    file=sys.stderr,
+                )
+            raise PriceProviderError(f"FMP returned 402 for {ticker} ({path}): {message}", retryable=False)
         if resp.status_code >= 500:
             raise PriceProviderError(f"FMP server error ({resp.status_code}) for {ticker} ({path})", retryable=True)
         if resp.status_code != 200:
@@ -124,8 +187,24 @@ class FMPFundamentalsProvider:
 
         return data if isinstance(data, list) else []
 
+    def _get_or_empty(self, path: str, ticker: str) -> list:
+        """Like _get, but never lets one endpoint's failure take down the
+        whole ticker — logs once and returns [] so fetch_fundamentals can
+        still use whatever the OTHER endpoints returned."""
+        try:
+            return self._get(path, ticker)
+        except PriceProviderError as exc:
+            print(f"INFO: {path} unavailable for {ticker}, continuing with other endpoints: {exc}", file=sys.stderr)
+            return []
+
     def fetch_fundamentals(self, ticker: str) -> List[FundamentalsRow]:
         """Three calls, merged by report period, into `fundamentals` rows.
+
+        Each of the three endpoints is fetched independently — one being
+        unavailable (plan-gated, rate-limited, etc.) no longer aborts the
+        whole ticker. Only raises (letting the caller retry/mark-failed)
+        if ALL THREE endpoints failed; a partial result is still useful
+        and gets returned instead of being thrown away.
 
         FMP's 2026 /stable/ migration didn't just move URLs — it also
         appears to have reshuffled which endpoint serves some fields (e.g.
@@ -139,9 +218,15 @@ class FMPFundamentalsProvider:
         _warn_if_field_missing() so it surfaces as a loud warning in
         job_runs/logs rather than a silent column of NULLs.
         """
-        ratios = self._get("ratios", ticker)
-        key_metrics = self._get("key-metrics", ticker)
-        income = self._get("income-statement", ticker)
+        ratios = self._get_or_empty("ratios", ticker)
+        key_metrics = self._get_or_empty("key-metrics", ticker)
+        income = self._get_or_empty("income-statement", ticker)
+
+        if not ratios and not key_metrics and not income:
+            raise PriceProviderError(
+                f"All 3 FMP endpoints failed/unavailable for {ticker} — nothing to return.",
+                retryable=False,
+            )
 
         by_date: Dict[str, dict] = {}
 
@@ -160,10 +245,11 @@ class FMPFundamentalsProvider:
                 bucket["fcf_yield"] = _first_present(row, "freeCashFlowYield", "fcfYield")
             bucket.setdefault("filed_date", row.get("fillingDate") or row.get("date"))
 
-        _warn_if_field_missing(ticker, "roe", ratios + key_metrics, by_date)
-        _warn_if_field_missing(ticker, "debt_equity", ratios + key_metrics, by_date)
-        _warn_if_field_missing(ticker, "ev_ebitda", ratios + key_metrics, by_date)
-        _warn_if_field_missing(ticker, "fcf_yield", ratios + key_metrics, by_date)
+        if ratios or key_metrics:
+            _warn_if_field_missing(ticker, "roe", ratios + key_metrics, by_date)
+            _warn_if_field_missing(ticker, "debt_equity", ratios + key_metrics, by_date)
+            _warn_if_field_missing(ticker, "ev_ebitda", ratios + key_metrics, by_date)
+            _warn_if_field_missing(ticker, "fcf_yield", ratios + key_metrics, by_date)
 
         # earnings_variance: rolling stdev of trailing 4 quarters' EPS,
         # a simple proxy for earnings stability (design doesn't pin down

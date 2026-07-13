@@ -108,10 +108,77 @@ class TestFMPFundamentalsMerge(unittest.TestCase):
         self.assertTrue(warning_calls, "expected a WARNING print mentioning ev_ebitda")
 
     @patch.object(FMPFundamentalsProvider, "_get")
-    def test_no_data_returns_empty_list(self, mock_get):
+    def test_raises_when_all_three_endpoints_return_nothing(self, mock_get):
+        # Changed from "returns []" — silently succeeding with zero data
+        # would mark the ticker 'complete' forever, never retried. Raising
+        # lets the normal retry_count/fetch_status mechanism try again later.
         mock_get.side_effect = lambda path, ticker: []
+        from src.providers.price_provider_base import PriceProviderError
+
+        with self.assertRaises(PriceProviderError):
+            self.provider.fetch_fundamentals("TEST")
+
+    @patch.object(FMPFundamentalsProvider, "_get")
+    def test_one_failed_endpoint_does_not_abort_the_whole_ticker(self, mock_get):
+        # ratios raises (e.g. plan-gated 402), but key-metrics and
+        # income-statement both succeed — should still return usable rows
+        # instead of losing the ticker entirely to one bad endpoint.
+        from src.providers.price_provider_base import PriceProviderError
+
+        def fake_get(path, ticker):
+            if path == "ratios":
+                raise PriceProviderError("FMP returned 402 for TEST (ratios): Premium...", retryable=False)
+            if path == "key-metrics":
+                return [{"date": "2025-12-31", "roe": 0.2, "evToEBITDA": 10.0, "fcfYield": 0.03}]
+            return []
+
+        mock_get.side_effect = fake_get
         rows = self.provider.fetch_fundamentals("TEST")
-        self.assertEqual(rows, [])
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].roe, 0.2)
+        self.assertEqual(rows[0].ev_ebitda, 10.0)
+
+    def test_circuit_breaker_skips_confirmed_unavailable_endpoint(self):
+        from src.providers import fmp_fundamentals_provider as module
+
+        self.addCleanup(module.reset_circuit_breaker)
+        module.reset_circuit_breaker()
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 402
+        mock_resp.text = "Premium Query Parameter: this endpoint is not available under your current subscription"
+
+        with patch("src.providers.fmp_fundamentals_provider.requests.get", return_value=mock_resp) as mock_requests_get:
+            from src.providers.price_provider_base import PriceProviderError
+
+            with self.assertRaises(PriceProviderError):
+                self.provider._get("ratios", "AAPL")
+            self.assertIn("ratios", module._unavailable_endpoints)
+
+            # Second call for a DIFFERENT ticker should short-circuit —
+            # no new HTTP request at all.
+            mock_requests_get.reset_mock()
+            with self.assertRaises(PriceProviderError):
+                self.provider._get("ratios", "MSFT")
+            mock_requests_get.assert_not_called()
+
+    def test_non_plan_gated_402_does_not_trip_circuit_breaker(self):
+        from src.providers import fmp_fundamentals_provider as module
+
+        self.addCleanup(module.reset_circuit_breaker)
+        module.reset_circuit_breaker()
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 402
+        mock_resp.text = "some other billing error unrelated to plan tier"
+
+        with patch("src.providers.fmp_fundamentals_provider.requests.get", return_value=mock_resp):
+            from src.providers.price_provider_base import PriceProviderError
+
+            with self.assertRaises(PriceProviderError):
+                self.provider._get("ratios", "AAPL")
+        self.assertNotIn("ratios", module._unavailable_endpoints)
 
 
 if __name__ == "__main__":

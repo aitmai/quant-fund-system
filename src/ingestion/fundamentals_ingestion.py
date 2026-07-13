@@ -24,6 +24,11 @@ from ..providers.price_provider_base import PriceProviderError
 
 MAX_RETRY_COUNT = 3
 STALENESS_DAYS = int(os.environ.get("FUNDAMENTALS_STALENESS_DAYS", "80"))
+# Same protective pattern as price_ingestion.py's MAX_CONSECUTIVE_FAILURES:
+# if every endpoint turns out to be plan-gated (see fmp_fundamentals_provider.py's
+# circuit breaker), every remaining ticker this run would fail too. Stop
+# early rather than grinding through hundreds of guaranteed failures.
+MAX_CONSECUTIVE_FAILURES = int(os.environ.get("FUNDAMENTALS_MAX_CONSECUTIVE_FAILURES", "15"))
 
 
 def seed_new_tickers(conn):
@@ -122,7 +127,7 @@ def run(conn, job=None) -> dict:
         print(msg, file=sys.stderr)
         if job:
             job.note(msg)
-        return {"processed": 0, "succeeded": 0, "failed": 0, "skipped_reason": reason}
+        return {"processed": 0, "succeeded": 0, "failed": 0, "skipped_reason": reason, "stopped_early_reason": ""}
 
     try:
         provider = FMPFundamentalsProvider()
@@ -131,12 +136,20 @@ def run(conn, job=None) -> dict:
         print(msg, file=sys.stderr)
         if job:
             job.note(msg)
-        return {"processed": 0, "succeeded": 0, "failed": 0, "skipped_reason": str(exc)}
+        return {
+            "processed": 0,
+            "succeeded": 0,
+            "failed": 0,
+            "skipped_reason": str(exc),
+            "stopped_early_reason": "",
+        }
 
     candidates = get_candidates(conn, tickers_remaining)
     today = date.today()
     succeeded = 0
     failed = 0
+    consecutive_failures = 0
+    stopped_early_reason = ""
     cfg = budget.get_config(conn, "fundamentals")
 
     for ticker, retry_count in candidates:
@@ -147,13 +160,32 @@ def run(conn, job=None) -> dict:
             # 3 calls consumed regardless of how many quarters came back.
             budget.record_usage(conn, "fundamentals", calls=cfg["calls_per_ticker"])
             succeeded += 1
+            consecutive_failures = 0
         except PriceProviderError as exc:
             print(f"ERROR: fundamentals fetch failed for {ticker}: {exc}", file=sys.stderr)
             mark_failure(conn, ticker, retry_count)
             budget.record_usage(conn, "fundamentals", calls=cfg["calls_per_ticker"])
             failed += 1
+            consecutive_failures += 1
 
-    summary = {"processed": succeeded + failed, "succeeded": succeeded, "failed": failed, "skipped_reason": ""}
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                stopped_early_reason = (
+                    f"{consecutive_failures} consecutive failures — likely all FMP endpoints "
+                    f"plan-gated or otherwise unavailable, not bad tickers. Stopping early; "
+                    f"remaining tickers will retry on the next scheduled run."
+                )
+                print(f"WARNING: {stopped_early_reason}", file=sys.stderr)
+                break
+
+    summary = {
+        "processed": succeeded + failed,
+        "succeeded": succeeded,
+        "failed": failed,
+        "skipped_reason": "",
+        "stopped_early_reason": stopped_early_reason,
+    }
     if job:
         job.note(f"processed={summary['processed']} succeeded={succeeded} failed={failed}")
+        if stopped_early_reason:
+            job.note(f"stopped_early: {stopped_early_reason}")
     return summary
