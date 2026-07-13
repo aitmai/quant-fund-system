@@ -66,6 +66,45 @@ class TestSECEdgarProvider(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertAlmostEqual(rows[0].roe, 0.1)
 
+    @patch("src.providers.sec_edgar_provider.print")
+    @patch.object(SECEdgarProvider, "_fetch_company_facts")
+    def test_mixed_failure_reasons_across_periods_still_gets_a_diagnosis(self, mock_fetch, mock_print):
+        # Reproduces the real bug (2026-07-13, ~30 tickers across every
+        # sector): older periods fail market cap (price_history only
+        # covers ~3 years, these companies have 15-20 years of XBRL
+        # history), while a DIFFERENT period fails on missing liabilities.
+        # No single reason hits 100% of periods, so the old single-reason
+        # checks stayed completely silent despite the field genuinely
+        # failing for every period — only the vague generic warning fired.
+        mock_fetch.return_value = _fake_company_facts(
+            net_income=[
+                ("2005-01-01", "2005-12-31", 1000000),   # old period: no price data this far back
+                ("2025-10-01", "2025-12-31", 1000000),   # recent period: has price, but no liabilities
+            ],
+            equity=[("2005-12-31", 10000000), ("2025-12-31", 10000000)],
+            op_income=[("2005-01-01", "2005-12-31", 1200000), ("2025-10-01", "2025-12-31", 1200000)],
+            shares=[("2005-12-31", 1000), ("2025-12-31", 1000)],
+            # liabilities deliberately omitted entirely -> every period
+            # that DOES get a market cap will still fail on "no_liabilities"
+        )
+        conn = MagicMock()
+        cursor = MagicMock()
+        # Only a recent price row — nothing from 2005, so the old period
+        # fails market cap while the recent one succeeds market cap but
+        # fails liabilities.
+        cursor.fetchall.return_value = [(date(2025, 12, 20), 100.0)]
+        conn.cursor.return_value.__enter__.return_value = cursor
+
+        rows = self.provider.fetch_fundamentals("TEST", "0000320193", conn=conn)
+
+        self.assertTrue(all(r.ev_ebitda is None for r in rows))  # confirms the field really did fail for every period
+
+        printed = " ".join(str(c) for c in mock_print.call_args_list)
+        # The fix: SOME message with an actual breakdown must appear —
+        # not silence beyond the generic "was None for ALL" line.
+        self.assertIn("no single reason dominates", printed)
+        self.assertIn("Breakdown:", printed)
+
     @patch.object(SECEdgarProvider, "_fetch_company_facts")
     def test_computes_debt_equity_from_liabilities_and_equity(self, mock_fetch):
         mock_fetch.return_value = _fake_company_facts(
@@ -75,6 +114,36 @@ class TestSECEdgarProvider(unittest.TestCase):
         )
         rows = self.provider.fetch_fundamentals("TEST", "0000320193")
         self.assertAlmostEqual(rows[0].debt_equity, 0.5)
+
+    @patch.object(SECEdgarProvider, "_fetch_company_facts")
+    def test_operating_income_found_despite_slightly_different_end_date_than_net_income(self, mock_fetch):
+        # Reproduces the real bug (confirmed 2026-07-13, ~30 tickers across
+        # every sector): OperatingIncomeLoss and NetIncomeLoss don't always
+        # share the exact same `end` date within the same filing (XBRL
+        # dimensional/context quirks) — exact-match .get() found nothing
+        # even when the data existed a day or two off, while equity/
+        # liabilities (already using _nearest()) kept working fine. This
+        # is why debt_equity worked but ev_ebitda/fcf_yield failed
+        # universally with no company-specific pattern.
+        facts = _fake_company_facts(
+            net_income=[("2025-10-01", "2025-12-31", 1000000)],
+            equity=[("2025-12-31", 10000000)],
+            liabilities=[("2025-12-31", 2000000)],
+            shares=[("2025-12-31", 1000)],
+        )
+        # op_income tagged a couple days off from net_income's end date
+        facts["facts"]["us-gaap"]["OperatingIncomeLoss"] = {
+            "units": {"USD": [{"start": "2025-10-02", "end": "2025-12-30", "val": 1200000}]}
+        }
+        mock_fetch.return_value = facts
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.fetchall.return_value = [(date(2025, 12, 20), 100.0)]
+        conn.cursor.return_value.__enter__.return_value = cursor
+
+        rows = self.provider.fetch_fundamentals("TEST", "0000320193", conn=conn)
+
+        self.assertIsNotNone(rows[0].ev_ebitda)
 
     @patch.object(SECEdgarProvider, "_fetch_company_facts")
     def test_falls_back_to_profit_loss_tag_when_net_income_loss_absent(self, mock_fetch):

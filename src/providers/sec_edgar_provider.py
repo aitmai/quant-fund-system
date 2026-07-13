@@ -234,11 +234,21 @@ class SECEdgarProvider:
             equity = _nearest(equity_by_period, report_date_str)
             liabilities = _nearest(liabilities_by_period, report_date_str)
             cash = _nearest(cash_by_period, report_date_str)
-            op_income = operating_income_by_period.get(report_date_str)
-            depreciation = depreciation_by_period.get(report_date_str)
-            op_cash_flow = operating_cash_flow_by_period.get(report_date_str)
-            capex = capex_by_period.get(report_date_str)
-            eps = eps_by_period.get(report_date_str)
+            # NOTE (confirmed 2026-07-13, ~30 tickers across every sector):
+            # these four used to look up via exact-match .get(report_date_str),
+            # unlike equity/liabilities/cash above which use _nearest(). XBRL
+            # concepts within the SAME filing don't always share identical
+            # end-dates (dimensional/segment reporting quirks), so exact match
+            # was systematically failing here even when the data existed a day
+            # or two off — exactly why debt_equity (built from the _nearest()
+            # fields) kept working while ev_ebitda/fcf_yield (built from these)
+            # kept failing for every single period, with no company-specific
+            # pattern to it.
+            op_income = _nearest(operating_income_by_period, report_date_str)
+            depreciation = _nearest(depreciation_by_period, report_date_str)
+            op_cash_flow = _nearest(operating_cash_flow_by_period, report_date_str)
+            capex = _nearest(capex_by_period, report_date_str)
+            eps = _nearest(eps_by_period, report_date_str)
             shares = _nearest_shares(shares_by_period, report_date_str)
 
             roe = _safe_divide(net_income, equity)
@@ -254,8 +264,8 @@ class SECEdgarProvider:
                 market_cap, cap_reason = _lookup_market_cap(price_index, report_date_str, shares)
             market_cap_failure_reasons[cap_reason] += 1
 
-            interest_expense = interest_expense_by_period.get(report_date_str)
-            income_tax = income_tax_by_period.get(report_date_str)
+            interest_expense = _nearest(interest_expense_by_period, report_date_str)
+            income_tax = _nearest(income_tax_by_period, report_date_str)
 
             ebitda = None
             if op_income is not None:
@@ -489,7 +499,19 @@ def _warn_if_ev_ebitda_mostly_failed(ticker: str, reasons: dict, total_periods: 
     every period (confirmed: WDAY, ICE, PODD) — the market-cap-specific
     warning above correctly stays silent in that case (market cap DID
     work), which otherwise left this failure mode with no diagnosis at
-    all beyond the generic 'field was None' message."""
+    all beyond the generic 'field was None' message.
+
+    IMPORTANT: prints a full breakdown as a fallback when no single reason
+    accounts for literally every period — confirmed as the dominant real
+    pattern (2026-07-13, ~30 tickers across every sector went completely
+    silent here) since a company's 60-80 quarters of history very often
+    fail for a MIX of reasons (e.g. price_history only covers the most
+    recent ~3 years, so older periods fail on "no market cap" while
+    recent ones fail on a missing tag) — no single reason ever hit 100%,
+    so the single-reason checks below never fired, even though the field
+    genuinely failed for every period. Silence was a diagnostic bug, not
+    an absence of something to report.
+    """
     if total_periods == 0 or reasons["ok"] > 0:
         return
     if reasons["no_market_cap"] == total_periods:
@@ -509,21 +531,38 @@ def _warn_if_ev_ebitda_mostly_failed(ticker: str, reasons: dict, total_periods: 
             f"sum) found for ANY period.",
             file=sys.stderr,
         )
+    else:
+        print(
+            f"WARNING: ev_ebitda never computed for {ticker} across all {total_periods} "
+            f"periods, but no single reason dominates — likely different periods failing "
+            f"for different reasons (e.g. older periods lacking market cap, recent ones "
+            f"lacking a tag). Breakdown: {reasons}",
+            file=sys.stderr,
+        )
 
 
 def _warn_if_fcf_yield_mostly_failed(ticker: str, reasons: dict, total_periods: int):
     """Same as _warn_if_ev_ebitda_mostly_failed, for fcf_yield's other
-    input (operating cash flow) when market cap wasn't the problem."""
+    input (operating cash flow) when market cap wasn't the problem. Same
+    mixed-reasons fallback applies — see that function's docstring."""
     if total_periods == 0 or reasons["ok"] > 0:
         return
     if reasons["no_market_cap"] == total_periods:
         return  # already covered by _warn_if_market_cap_mostly_failed
-    print(
-        f"WARNING: fcf_yield never computed for {ticker} — market cap was fine, but no "
-        f"NetCashProvidedByUsedInOperatingActivities XBRL value found for ANY period. "
-        f"This company's filings may tag operating cash flow under a different concept.",
-        file=sys.stderr,
-    )
+    if reasons["no_operating_cash_flow"] == total_periods:
+        print(
+            f"WARNING: fcf_yield never computed for {ticker} — market cap was fine, but no "
+            f"NetCashProvidedByUsedInOperatingActivities XBRL value found for ANY period. "
+            f"This company's filings may tag operating cash flow under a different concept.",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"WARNING: fcf_yield never computed for {ticker} across all {total_periods} "
+            f"periods, but no single reason dominates — likely different periods failing "
+            f"for different reasons. Breakdown: {reasons}",
+            file=sys.stderr,
+        )
 
 
 def _warn_if_market_cap_mostly_failed(
@@ -572,6 +611,25 @@ def _warn_if_market_cap_mostly_failed(
             f"WARNING: market cap lookup hit a database error for {ticker} on "
             f"{reasons['db_error']}/{total_periods} periods — see the ERROR line(s) above "
             f"for the actual exception.",
+            file=sys.stderr,
+        )
+    else:
+        # No single reason hit 100% of periods, but market cap still failed
+        # for ALL of them (reasons["ok"] == 0) — a MIX of failure modes
+        # across different periods (confirmed 2026-07-13: this was the
+        # dominant real pattern across ~30 tickers spanning every sector,
+        # e.g. older periods failing on price_history coverage while
+        # different periods fail on shares-date alignment). Missing this
+        # branch meant BOTH this function AND _warn_if_ev_ebitda_mostly_failed/
+        # _warn_if_fcf_yield_mostly_failed stayed silent — those defer to
+        # this one whenever their own "no_market_cap" reason hits 100%,
+        # so a gap here was a gap everywhere ev_ebitda/fcf_yield depend on
+        # market cap.
+        print(
+            f"WARNING: market cap never computed for {ticker} across all {total_periods} "
+            f"periods, but no single reason dominates — different periods are failing for "
+            f"different reasons (e.g. some too old for price_history's backfill window, "
+            f"others failing shares-date alignment). Breakdown: {reasons}",
             file=sys.stderr,
         )
 
