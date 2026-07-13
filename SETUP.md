@@ -136,8 +136,61 @@ via `workflow_dispatch` to confirm they run clean before relying on the
 schedule. Leave `daily-fundamentals-ingestion` manual-only per step 4
 above.
 
+## Phase 2 — Factor Scoring
+
+Goal (DESIGN.md §13): `factor_scores` populated weekly with raw
+momentum/low-vol/quality/value z-scores — no schema migration needed,
+`factor_scores` already exists from Phase 0.
+
+### 1. Run it manually first
+
+```bash
+python scripts/run_factor_scoring_cron.py --manual --triggered-by aitmai
+```
+Prints a diagnostic summary — how many active tickers got scored vs.
+missing, per factor, against the total active universe:
+```
+Factor scoring: 503 active tickers
+  momentum: 480/503 scored, 23/503 missing (23 due to insufficient price history)
+  lowvol: 495/503 scored, 8/503 missing (8 due to insufficient price history)
+  quality: 410/503 scored, 93/503 missing
+  value: 395/503 scored, 108/503 missing
+```
+`missing` for momentum/lowvol usually means still-backfilling price
+history (self-resolving). `missing` for quality/value reflects EDGAR
+coverage gaps already known from Phase 1.
+
+### 2. Check the actual scores
+
+```sql
+select ticker, momentum_z, quality_z, value_z, lowvol_z
+from factor_scores
+where score_date = CURRENT_DATE
+order by momentum_z desc
+limit 10;
+```
+
+### 3. Once it looks right, schedule it
+
+Uncomment the `schedule:` block in `.github/workflows/factor_scoring_cron.yml`
+(currently `workflow_dispatch`-only) — same pattern as every other cron
+in this repo: validate manually first, automate second.
+
+### Known open items (flagged, not silently resolved)
+
+- **Quality's "margin stability" input** is substituted with
+  `earnings_variance` (trailing-4-quarter EPS stdev) — the `fundamentals`
+  table has no margin-history column. A real proxy, not the same metric.
+- **`factor_scores.decile_rank`** is left NULL — DESIGN.md's fix #5
+  removed the fixed-weight composite this column presumably assumed, and
+  no per-factor decile meaning is specified. Worth an explicit decision
+  before Phase 3 needs it.
+
 ### What's next
 
-Once backfill is progressing (it doesn't need to be *complete* — Stage 2
-scores whatever data is available), you're on to **Phase 2 — Factor Scoring**
-(DESIGN.md §13).
+Once factor scores are populating (again, doesn't need to be 100%
+coverage — Stage 3 works with whatever's there), you're on to
+**Phase 3 — ML Ranking** (DESIGN.md §13): a gradient-boosted/logistic
+model trained on these raw z-scores as features, learning the effective
+factor weighting itself each walk-forward retrain rather than using a
+fixed composite.

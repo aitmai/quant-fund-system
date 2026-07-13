@@ -1,0 +1,42 @@
+# Phase 2 factor scoring (DESIGN.md §3 Stage 2, §7 — "Weekly cron").
+#
+# Deliberately manual-trigger-only for now, NOT scheduled — this is a
+# brand-new module and hasn't been validated against a live run yet.
+# Trigger manually, check the printed diagnostic summary (populated vs.
+# missing per factor, against total active tickers), and uncomment the
+# `schedule:` block once a run looks right.
+name: weekly-factor-scoring
+
+on:
+  workflow_dispatch:
+    inputs:
+      score_date:
+        description: "Score as of this date (YYYY-MM-DD). Leave blank for today."
+        required: false
+        type: string
+  # schedule:
+  #   - cron: "0 8 * * 0"   # Sunday 08:00 UTC, before Monday's market open — uncomment once validated
+
+jobs:
+  score:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run factor scoring
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          if [ -n "${{ github.event.inputs.score_date }}" ]; then
+            python scripts/run_factor_scoring_cron.py --score-date "${{ github.event.inputs.score_date }}"
+          else
+            python scripts/run_factor_scoring_cron.py
+          fi

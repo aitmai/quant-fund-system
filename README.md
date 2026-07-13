@@ -21,14 +21,17 @@ end to end.
 | `scripts/run_universe_sync.py` | Phase 1: index constituent diffing (S&P 500 / Russell 1000) → `universe` |
 | `scripts/upload_manual_tickers.py` | Phase 1: manual ticker list upload → `universe` |
 | `scripts/run_ingestion_cron.py` | Phase 1: daily price + fundamentals backfill/maintenance |
+| `scripts/run_factor_scoring_cron.py` | Phase 2: weekly factor scoring → `factor_scores` |
 | `src/providers/` | Price providers (Tiingo, yfinance) behind a shared interface + automatic fallback; SEC EDGAR fundamentals client |
 | `src/universe/` | Index constituent sources + diffing/upload/liquidity-filter logic |
 | `src/ingestion/` | Backfill-then-maintenance orchestration + daily/rolling-30-day budget tracking |
+| `src/scoring/` | Phase 2: bulk data fetch, momentum/low-vol/quality/value raw factors, sector-relative z-scoring |
 | `.github/workflows/hello_world.yml` | Runs the Phase 0 milestone on GitHub Actions |
 | `.github/workflows/keepalive.yml` | Monthly commit preventing GitHub's 60-day scheduled-workflow disable (fix #1) |
 | `.github/workflows/price_ingestion_cron.yml` | Daily price ingestion cron (scheduled — validated, provider fallback + request pacing in place) |
 | `.github/workflows/fundamentals_ingestion_cron.yml` | Fundamentals ingestion cron (manual-trigger-only until the SEC EDGAR provider is validated live) |
 | `.github/workflows/universe_sync.yml` | Monthly universe reconciliation cron |
+| `.github/workflows/factor_scoring_cron.yml` | Weekly factor scoring cron (manual-trigger-only until validated live) |
 | `requirements.txt` | Pinned exact versions (fix #6 — reproducibility across a multi-week backtest) |
 | `.env.example` | Every environment variable this system needs |
 | `SETUP.md` | Step-by-step Phase 0 + Phase 1 instructions |
@@ -72,9 +75,34 @@ Set `SEC_EDGAR_USER_AGENT` in `.env` (a descriptive string identifying
 who's making requests — SEC's fair-access policy, not optional; requests
 without one commonly get a 403). No other configuration needed.
 
+## Phase 2 — Factor Scoring
+
+`src/scoring/` computes the four factors from DESIGN.md §3 Stage 2 —
+momentum, low-volatility, quality, value — as raw z-scores written to
+`factor_scores` (no fixed-weight composite; that's Stage 3's job).
+
+Two design calls made 2026-07-13 that DESIGN.md itself doesn't specify:
+- **Z-scoring is sector-relative**, not universe-wide (Quality within
+  Tech compared to Tech, not to Utilities).
+- **Missing data excludes a ticker from that factor** (NULL), never
+  imputes a neutral/zero score — an imputed "average" would tell Stage
+  3's model something false about a ticker we genuinely have no data on.
+
+Every run prints a diagnostic: how many active tickers are missing each
+factor, against the total active universe — not buried in a warning.
+
+**Known gap, flagged not silently decided:** DESIGN.md specifies Quality
+as "ROE, margin stability, debt/equity," but the `fundamentals` table
+(built in Phase 1) has no margin-history column. `earnings_variance`
+(trailing-4-quarter EPS stdev, already computed during ingestion) is
+substituted as the stability component — a genuine proxy, not the same
+metric. Also, `factor_scores.decile_rank` is left NULL: DESIGN.md's
+fix #5 removed the fixed-weight composite this column was presumably
+built around, and no per-factor decile meaning is specified anywhere.
+
 ## Build sequence
 
-This scaffold covers **Phase 0 and Phase 1** (DESIGN.md §13). Phases 2–11 —
+This scaffold covers **Phase 0, Phase 1, and Phase 2** (DESIGN.md §13). Phases 3–11 —
 the rest of the 6-stage pipeline, exit rules, trade tracking, the GUI, the
 hedge sleeve, and the backtest engine — are built incrementally on top of
 this, each with its own milestone before moving to the next.
