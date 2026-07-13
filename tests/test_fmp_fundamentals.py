@@ -57,6 +57,57 @@ class TestFMPFundamentalsMerge(unittest.TestCase):
         self.assertIsNone(rows[0].fcf_yield)
 
     @patch.object(FMPFundamentalsProvider, "_get")
+    def test_new_stable_field_names_are_picked_up(self, mock_get):
+        # Simulates FMP's 2026 /stable/ field renames: 'roe' instead of
+        # 'returnOnEquity', 'debtToEquity' instead of 'debtEquityRatio'.
+        def fake_get(path, ticker):
+            if path == "ratios":
+                return [{"date": "2025-12-31", "fillingDate": "2026-02-10", "debtToEquity": 0.8}]
+            if path == "key-metrics":
+                return [{"date": "2025-12-31", "roe": 0.22, "evToEBITDA": 11.0, "fcfYield": 0.05}]
+            return []
+
+        mock_get.side_effect = fake_get
+        rows = self.provider.fetch_fundamentals("TEST")
+        row = rows[0]
+        self.assertEqual(row.roe, 0.22)
+        self.assertEqual(row.debt_equity, 0.8)
+        self.assertEqual(row.ev_ebitda, 11.0)
+        self.assertEqual(row.fcf_yield, 0.05)
+
+    @patch.object(FMPFundamentalsProvider, "_get")
+    def test_roe_found_via_key_metrics_when_absent_from_ratios(self, mock_get):
+        # Reflects the reshuffle where ROE reportedly moved out of `ratios`.
+        def fake_get(path, ticker):
+            if path == "ratios":
+                return [{"date": "2025-12-31", "debtEquityRatio": 1.0}]  # no roe here
+            if path == "key-metrics":
+                return [{"date": "2025-12-31", "returnOnEquity": 0.3}]  # old-style name, other endpoint
+            return []
+
+        mock_get.side_effect = fake_get
+        rows = self.provider.fetch_fundamentals("TEST")
+        self.assertEqual(rows[0].roe, 0.3)
+
+    @patch("src.providers.fmp_fundamentals_provider.print")
+    @patch.object(FMPFundamentalsProvider, "_get")
+    def test_warns_when_a_field_never_matches_any_candidate_name(self, mock_get, mock_print):
+        # None of the expected candidate keys for ev_ebitda are present —
+        # should warn loudly rather than silently write NULLs.
+        def fake_get(path, ticker):
+            if path == "ratios":
+                return [{"date": "2025-12-31", "roe": 0.1}]
+            if path == "key-metrics":
+                return [{"date": "2025-12-31", "someUnexpectedFieldName": 99}]
+            return []
+
+        mock_get.side_effect = fake_get
+        self.provider.fetch_fundamentals("TEST")
+
+        warning_calls = [c for c in mock_print.call_args_list if "ev_ebitda" in str(c) and "WARNING" in str(c)]
+        self.assertTrue(warning_calls, "expected a WARNING print mentioning ev_ebitda")
+
+    @patch.object(FMPFundamentalsProvider, "_get")
     def test_no_data_returns_empty_list(self, mock_get):
         mock_get.side_effect = lambda path, ticker: []
         rows = self.provider.fetch_fundamentals("TEST")

@@ -26,7 +26,7 @@ from typing import List, Dict
 
 import requests
 
-FMP_BASE_URL = "https://financialmodelingprep.com/api/v3"
+FMP_BASE_URL = "https://financialmodelingprep.com/stable"
 REQUEST_TIMEOUT_SECONDS = 30
 
 # iShares IWB (Russell 1000) holdings CSV. iShares occasionally rotates this
@@ -42,7 +42,7 @@ def fetch_sp500_constituents() -> List[Dict]:
     if not api_key:
         raise RuntimeError("FMP_API_KEY is not set. See .env.example.")
 
-    url = f"{FMP_BASE_URL}/sp500_constituent"
+    url = f"{FMP_BASE_URL}/sp500-constituent"
     resp = requests.get(url, params={"apikey": api_key}, timeout=REQUEST_TIMEOUT_SECONDS)
     resp.raise_for_status()
     data = resp.json()
