@@ -14,9 +14,11 @@ the sync, because avg_dollar_volume can't be computed for a brand-new
 ticker until price_history has backfilled — see its docstring.
 
 Known gap (flagging rather than silently guessing): `market_cap` has no
-free bulk source at this stage — FMP's per-ticker /v3/profile endpoint
+free bulk source at this stage — FMP's per-ticker /stable/profile endpoint
 would give it, but that's a 4th API call per ticker competing with the
-fundamentals budget. Left NULL for now; market_cap enrichment is a good
+fundamentals budget, AND (learned 2026-07-13, after /stable/sp500-constituent
+turned out to require a paid plan) it may itself be paid-gated on the free
+tier — untested. Left NULL for now; market_cap enrichment is a good
 candidate for a future lightweight pass, not wired into the daily budget
 math yet.
 """

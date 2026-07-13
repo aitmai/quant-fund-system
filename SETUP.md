@@ -88,10 +88,12 @@ Locally or via `workflow_dispatch` on `monthly-universe-sync`:
 ```bash
 python scripts/run_universe_sync.py --manual --triggered-by aitmai
 ```
-This fetches current S&P 500 constituents from FMP and diffs them into
-`universe`. Add `--include-russell1000` to also attempt the iShares IWB
-holdings CSV (best-effort — see `src/universe/index_sources.py` for why
-that source is more fragile). To add your own tickers on top:
+This fetches current S&P 500 constituents from the iShares IVV holdings CSV
+(free, no key) and diffs them into `universe`. Add `--include-russell1000`
+to also attempt the iShares IWB holdings CSV. Both are best-effort — see
+`src/universe/index_sources.py` for why iShares CSV sourcing is more
+fragile than a real API, and why neither touches FMP at all (FMP's own
+S&P 500 constituent endpoint turned out to require a paid plan). To add your own tickers on top:
 ```bash
 python scripts/upload_manual_tickers.py --file my_tickers.csv --triggered-by aitmai
 ```
