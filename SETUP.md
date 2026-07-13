@@ -105,21 +105,29 @@ python scripts/upload_manual_tickers.py --file my_tickers.csv --triggered-by ait
 ### 4. Kick off the backfill
 
 ```bash
-python scripts/run_ingestion_cron.py --manual --triggered-by aitmai
+python scripts/run_ingestion_cron.py --only price --manual --triggered-by aitmai
+python scripts/run_ingestion_cron.py --only fundamentals --manual --triggered-by aitmai
 ```
-Run this daily (locally or via `workflow_dispatch` on `daily-ingestion`)
-until the backfill completes — at the seeded budgets (400 price / 225
-fundamentals-equivalent-tickers per day), a ~3,000-ticker universe takes
-about 12 days for fundamentals to fully backfill (DESIGN.md §5); price
-backfill is faster since it's one call per ticker regardless of history
-length. Once `daily-ingestion`'s schedule takes over, this runs itself.
+Run these daily until backfill completes. Price is validated and now runs
+on its own schedule (`price_ingestion_cron.yml`) — no more manual runs
+needed once that's confirmed working. Fundamentals stays manual
+(`workflow_dispatch` on `daily-fundamentals-ingestion`) until a run comes
+back with no `WARNING: fundamentals field ... was None for ALL` lines in
+the logs; at that point, uncomment the `schedule:` block in
+`fundamentals_ingestion_cron.yml` to put it on autopilot too. At the
+seeded budgets (400 price calls / 225 fundamentals calls ÷ 3 calls-per-ticker
+= 75 tickers/day), a ~3,000-ticker universe takes about 12 days for
+fundamentals to fully backfill (DESIGN.md §5); price backfill is faster
+since it's one call per ticker regardless of history length.
 
-### 5. Confirm the daily-ingestion and monthly-universe-sync workflows are scheduled
+### 5. Confirm the price ingestion and monthly-universe-sync workflows are scheduled
 
 Same as the keepalive check in step 5 above — they need no secrets beyond
 what's already set, they just need to show up under the Actions tab.
-Trigger each manually once via `workflow_dispatch` to confirm they run
-clean before relying on the schedule.
+Trigger `daily-price-ingestion` and `monthly-universe-sync` manually once
+via `workflow_dispatch` to confirm they run clean before relying on the
+schedule. Leave `daily-fundamentals-ingestion` manual-only per step 4
+above.
 
 ### What's next
 

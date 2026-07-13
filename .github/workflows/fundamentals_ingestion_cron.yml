@@ -1,0 +1,36 @@
+# Phase 1 daily fundamentals ingestion (DESIGN.md §5, §7).
+#
+# Deliberately workflow_dispatch-only for now, NOT scheduled — fundamentals
+# ingestion has an open question: FMP's 2026 /stable/ API migration appears
+# to have renamed/reshuffled some fields (see the module docstring in
+# src/providers/fmp_fundamentals_provider.py), and that hasn't been
+# confirmed against a live response yet. Trigger this manually, check
+# stderr for any "WARNING: fundamentals field ... was None for ALL"
+# lines, and only add a `schedule:` block (matching price_ingestion_cron.yml)
+# once a run comes back clean.
+name: daily-fundamentals-ingestion
+
+on:
+  workflow_dispatch: {}
+  # schedule:
+  #   - cron: "45 13 * * *"   # uncomment once field-name mapping is confirmed
+
+jobs:
+  ingest-fundamentals:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run fundamentals ingestion
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+        run: python scripts/run_ingestion_cron.py --only fundamentals

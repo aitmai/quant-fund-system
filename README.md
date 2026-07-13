@@ -25,7 +25,8 @@ end to end.
 | `src/ingestion/` | Backfill-then-maintenance orchestration + daily/rolling-30-day budget tracking |
 | `.github/workflows/hello_world.yml` | Runs the Phase 0 milestone on GitHub Actions |
 | `.github/workflows/keepalive.yml` | Monthly commit preventing GitHub's 60-day scheduled-workflow disable (fix #1) |
-| `.github/workflows/ingestion_cron.yml` | Daily price/fundamentals ingestion cron |
+| `.github/workflows/price_ingestion_cron.yml` | Daily price ingestion cron (scheduled — validated, provider fallback + request pacing in place) |
+| `.github/workflows/fundamentals_ingestion_cron.yml` | Fundamentals ingestion cron (manual-trigger-only until FMP field-name mapping is confirmed live) |
 | `.github/workflows/universe_sync.yml` | Monthly universe reconciliation cron |
 | `requirements.txt` | Pinned exact versions (fix #6 — reproducibility across a multi-week backtest) |
 | `.env.example` | Every environment variable this system needs |

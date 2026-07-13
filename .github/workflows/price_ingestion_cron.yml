@@ -1,0 +1,42 @@
+# Phase 1 daily price ingestion (DESIGN.md §5, §7): backfill-then-maintenance
+# for price_history against its own daily budget (independent of fundamentals
+# — DESIGN.md §5's whole point is that one data type's budget/schedule never
+# blocks the other). Runs on GitHub's free public runners, same pattern as
+# the Phase 0 hello-world / keepalive workflows.
+#
+# Scheduled on its own (separate from fundamentals) because price ingestion
+# is validated — provider fallback (Tiingo/yfinance) and request pacing
+# (PRICE_REQUEST_DELAY_SECONDS, to avoid Yahoo throttling) are both in
+# place. Fundamentals stays manual-trigger-only for now — see
+# fundamentals_ingestion_cron.yml — until the FMP field-name mapping is
+# confirmed against a live run.
+name: daily-price-ingestion
+
+on:
+  schedule:
+    # 13:30 UTC = after US market close settles, before the next day's
+    # cron stacks up. Runs every day, not just weekdays — maintenance
+    # fetches for already-backfilled tickers are cheap either way, and
+    # skipping weekends adds complexity for negligible budget savings.
+    - cron: "30 13 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  ingest-price:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run price ingestion
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          TIINGO_API_KEY: ${{ secrets.TIINGO_API_KEY }}
+        run: python scripts/run_ingestion_cron.py --only price

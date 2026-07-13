@@ -14,6 +14,7 @@ since they get a fresh ingestion_state row with no last_fetched_date.
 
 import os
 import sys
+import time
 from datetime import date, timedelta
 
 from . import budget
@@ -22,6 +23,15 @@ from ..providers.provider_factory import fetch_with_fallback
 
 DEFAULT_BACKFILL_YEARS = int(os.environ.get("PRICE_BACKFILL_YEARS", "3"))
 MAX_RETRY_COUNT = 3
+# yfinance has no published rate limit, but hammering hundreds of tickers
+# back to back with zero pacing reliably trips Yahoo's throttling — it
+# comes back as an empty response body, which yfinance/json surfaces as
+# "Expecting value: line 1 column 1 (char 0)". That's NOT the same thing
+# as a bad/delisted ticker (BLDR, BKNG, TSCO, HOOD etc. are all real,
+# currently-listed large caps) — the fix is pacing requests, not excluding
+# tickers. Default is deliberately small: even at 0.5s/ticker, 400
+# tickers/day only adds ~3-4 minutes to a daily cron run.
+REQUEST_DELAY_SECONDS = float(os.environ.get("PRICE_REQUEST_DELAY_SECONDS", "0.5"))
 
 
 def seed_new_tickers(conn):
@@ -147,6 +157,9 @@ def run(conn, job=None) -> dict:
             mark_failure(conn, ticker, retry_count)
             budget.record_usage(conn, "price", calls=1)  # the attempt still cost a call
             failed += 1
+
+        if REQUEST_DELAY_SECONDS > 0:
+            time.sleep(REQUEST_DELAY_SECONDS)
 
     summary = {"processed": succeeded + failed, "succeeded": succeeded, "failed": failed, "skipped_reason": ""}
     if job:
