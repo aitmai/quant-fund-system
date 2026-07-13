@@ -11,12 +11,20 @@ failure, since it's frequently transient throttling rather than a real
 missing ticker.
 """
 
+import os
 from datetime import date, timedelta
 from typing import List, Optional
 
 import yfinance as yf
 
 from .price_provider_base import PriceBar, PriceProvider, PriceProviderError
+
+# Explicit, not relying on yfinance's own default (which has varied across
+# versions and isn't guaranteed for the pinned 0.2.40). Without this, a
+# single stalled connection to Yahoo can hang the request indefinitely,
+# stalling the whole daily-price-ingestion run behind one bad ticker.
+# Matches the same pattern already used in tiingo_provider.py.
+REQUEST_TIMEOUT_SECONDS = float(os.environ.get("PRICE_REQUEST_TIMEOUT_SECONDS", "15"))
 
 
 class YFinanceProvider(PriceProvider):
@@ -37,8 +45,12 @@ class YFinanceProvider(PriceProvider):
                 interval="1d",
                 auto_adjust=False,
                 actions=False,
+                timeout=REQUEST_TIMEOUT_SECONDS,
             )
         except Exception as exc:
+            # Covers requests.exceptions.Timeout/ConnectionError as well as
+            # yfinance's own wrapped exceptions — all treated as retryable,
+            # since a timeout says nothing about whether the ticker is valid.
             raise PriceProviderError(f"yfinance request failed for {ticker}: {exc}", retryable=True)
 
         if df is None or df.empty:
