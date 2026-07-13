@@ -56,6 +56,15 @@ def fetch_price_panel(conn, as_of: Optional[date] = None) -> pd.DataFrame:
             )
             rows = cur.fetchall()
     df = pd.DataFrame(rows, columns=["ticker", "date", "close", "adj_close"])
+    # psycopg2 returns Postgres NUMERIC as decimal.Decimal, which lands in
+    # pandas as an object-dtype column. Cast to float64 immediately at
+    # this boundary — letting Decimal propagate into numpy/pandas
+    # reductions (std, mean, etc. in momentum_lowvol.py / zscore.py) raises
+    # "unsupported operand type(s) for -: 'float' and 'decimal.Decimal'",
+    # since pandas' internal nanvar computes the mean as float64 and then
+    # subtracts it from the still-Decimal array.
+    df["close"] = df["close"].astype(float)
+    df["adj_close"] = df["adj_close"].astype(float)
     # Prefer adjusted close (splits/dividends already applied); fall back
     # to raw close only where adj_close is missing.
     df["price"] = df["adj_close"].fillna(df["close"])
