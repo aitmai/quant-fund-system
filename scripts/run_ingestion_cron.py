@@ -17,6 +17,16 @@ import sys
 
 sys.path.insert(0, ".")
 
+# Must run BEFORE any `src.*` import below — some provider modules read
+# env vars (timeouts, delays, etc.) at MODULE level, so if .env hasn't
+# been loaded yet by the time those modules import, they'd silently use
+# defaults/None instead of what's actually in .env. This was previously
+# missing entirely (python-dotenv was in requirements.txt but never
+# called anywhere), so editing .env never actually took effect locally
+# — only real exported env vars worked. Fixed 2026-07-13.
+from dotenv import load_dotenv
+load_dotenv()
+
 from src.db import get_connection
 from src.ingestion import fundamentals_ingestion, price_ingestion
 from src.job_run import JobRun

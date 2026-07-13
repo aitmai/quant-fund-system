@@ -19,6 +19,9 @@ from datetime import datetime, timezone
 
 import psycopg2
 
+from dotenv import load_dotenv
+load_dotenv()
+
 
 def main() -> int:
     database_url = os.environ.get("DATABASE_URL")

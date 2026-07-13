@@ -15,6 +15,11 @@ import sys
 
 sys.path.insert(0, ".")
 
+# Must run BEFORE any `src.*` import below — see run_ingestion_cron.py
+# for why placement matters (module-level env reads in provider files).
+from dotenv import load_dotenv
+load_dotenv()
+
 from src.db import get_connection
 from src.job_run import JobRun
 from src.universe.construct_universe import upload_manual_tickers
