@@ -88,12 +88,15 @@ Locally or via `workflow_dispatch` on `monthly-universe-sync`:
 ```bash
 python scripts/run_universe_sync.py --manual --triggered-by aitmai
 ```
-This fetches current S&P 500 constituents from the iShares IVV holdings CSV
-(free, no key) and diffs them into `universe`. Add `--include-russell1000`
-to also attempt the iShares IWB holdings CSV. Both are best-effort — see
-`src/universe/index_sources.py` for why iShares CSV sourcing is more
-fragile than a real API, and why neither touches FMP at all (FMP's own
-S&P 500 constituent endpoint turned out to require a paid plan). To add your own tickers on top:
+This fetches current S&P 500 constituents from Wikipedia's "List of S&P 500
+companies" table (free, no key) and diffs them into `universe`. This
+replaced an earlier iShares-CSV-based approach that turned out to be
+blocked by iShares' bot detection — see `src/universe/index_sources.py`
+for the full story. `--include-russell1000` still attempts the iShares
+IWB holdings CSV, but given the same bot-detection issue was hit on the
+near-identical S&P 500 (IVV) endpoint, expect it to likely return nothing
+too; manual ticker upload is the practical way to extend past S&P 500
+for now. To add your own tickers on top:
 ```bash
 python scripts/upload_manual_tickers.py --file my_tickers.csv --triggered-by aitmai
 ```
