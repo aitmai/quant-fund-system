@@ -154,7 +154,7 @@ class TestSECEdgarProvider(unittest.TestCase):
         )
         conn = MagicMock()
         cursor = MagicMock()
-        cursor.fetchone.return_value = (100.0,)  # $100/share close price
+        cursor.fetchall.return_value = [(date(2025, 12, 20), 100.0)]  # $100/share close price
         conn.cursor.return_value.__enter__.return_value = cursor
 
         rows = self.provider.fetch_fundamentals("TEST", "0000320193", conn=conn)
@@ -221,6 +221,45 @@ class TestSECEdgarProvider(unittest.TestCase):
         self.assertTrue(warning_calls)
 
 
+    @patch.object(SECEdgarProvider, "_fetch_company_facts")
+    def test_debt_equity_falls_back_to_current_plus_noncurrent_liabilities(self, mock_fetch):
+        # Combined `Liabilities` tag absent entirely (confirmed: WMT) —
+        # should sum LiabilitiesCurrent + LiabilitiesNoncurrent instead.
+        facts = _fake_company_facts(
+            net_income=[("2025-10-01", "2025-12-31", 1000000)],
+            equity=[("2025-12-31", 10000000)],
+        )
+        facts["facts"]["us-gaap"]["LiabilitiesCurrent"] = {
+            "units": {"USD": [{"end": "2025-12-31", "val": 3000000}]}
+        }
+        facts["facts"]["us-gaap"]["LiabilitiesNoncurrent"] = {
+            "units": {"USD": [{"end": "2025-12-31", "val": 2000000}]}
+        }
+        mock_fetch.return_value = facts
+
+        rows = self.provider.fetch_fundamentals("WMT", "0000104169")
+        self.assertAlmostEqual(rows[0].debt_equity, 5_000_000 / 10_000_000)
+
+    @patch.object(SECEdgarProvider, "_fetch_company_facts")
+    def test_price_history_fetched_only_once_regardless_of_period_count(self, mock_fetch):
+        # Prior implementation queried price_history once PER XBRL period
+        # (60-100+ round trips for long filing histories) — this locks in
+        # that it's now exactly one query per ticker regardless of how
+        # many periods are being processed.
+        net_income = [(f"{y}-01-01", f"{y}-12-31", 100) for y in range(2000, 2020)]  # 20 periods
+        mock_fetch.return_value = _fake_company_facts(
+            net_income=net_income,
+            equity=[("2019-12-31", 10000)],
+        )
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.fetchall.return_value = [(date(2019, 1, 1), 50.0)]
+        conn.cursor.return_value.__enter__.return_value = cursor
+
+        self.provider.fetch_fundamentals("TEST", "0000320193", conn=conn)
+
+        self.assertEqual(cursor.fetchall.call_count, 1)
+
     @patch("src.providers.sec_edgar_provider.print")
     @patch.object(SECEdgarProvider, "_fetch_company_facts")
     def test_diagnoses_no_shares_outstanding_at_all(self, mock_fetch, mock_print):
@@ -234,7 +273,6 @@ class TestSECEdgarProvider(unittest.TestCase):
         )
         conn = MagicMock()
         cursor = MagicMock()
-        cursor.fetchone.return_value = (100.0,)
         conn.cursor.return_value.__enter__.return_value = cursor
 
         self.provider.fetch_fundamentals("TEST", "0000320193", conn=conn)
@@ -255,7 +293,7 @@ class TestSECEdgarProvider(unittest.TestCase):
         )
         conn = MagicMock()
         cursor = MagicMock()
-        cursor.fetchone.return_value = None  # no price_history row at all
+        cursor.fetchall.return_value = []  # no price_history rows at all
         conn.cursor.return_value.__enter__.return_value = cursor
 
         self.provider.fetch_fundamentals("TEST", "0000320193", conn=conn)
@@ -292,7 +330,7 @@ class TestSECEdgarProvider(unittest.TestCase):
         )
         conn = MagicMock()
         cursor = MagicMock()
-        cursor.fetchone.return_value = (100.0,)
+        cursor.fetchall.return_value = [(date(2025, 12, 20), 100.0)]
         conn.cursor.return_value.__enter__.return_value = cursor
 
         self.provider.fetch_fundamentals("TEST", "0000320193", conn=conn)

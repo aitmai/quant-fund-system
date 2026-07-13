@@ -34,6 +34,7 @@ SEC_EDGAR_USER_AGENT in .env.example. Requests without one are commonly
 rejected with 403.
 """
 
+import bisect
 import os
 import statistics
 import sys
@@ -52,6 +53,11 @@ REQUEST_TIMEOUT_SECONDS = 30
 _NET_INCOME_TAGS = ("NetIncomeLoss", "ProfitLoss")
 _EQUITY_TAGS = ("StockholdersEquity", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest")
 _LIABILITIES_TAGS = ("Liabilities",)
+# Some companies (confirmed: WMT) don't tag the combined `Liabilities`
+# concept at all — only the split current/noncurrent pieces. Summed as a
+# fallback when the combined tag comes back empty.
+_LIABILITIES_CURRENT_TAGS = ("LiabilitiesCurrent",)
+_LIABILITIES_NONCURRENT_TAGS = ("LiabilitiesNoncurrent",)
 _CASH_TAGS = ("CashAndCashEquivalentsAtCarryingValue", "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents")
 _OPERATING_INCOME_TAGS = ("OperatingIncomeLoss",)
 _DEPRECIATION_TAGS = ("DepreciationDepletionAndAmortization", "DepreciationAmortizationAndAccretionNet", "Depreciation")
@@ -126,6 +132,15 @@ class SECEdgarProvider:
         net_income_by_period = _collect_duration_facts(us_gaap, _NET_INCOME_TAGS)
         equity_by_period = _collect_instant_facts(us_gaap, _EQUITY_TAGS)
         liabilities_by_period = _collect_instant_facts(us_gaap, _LIABILITIES_TAGS)
+        if not liabilities_by_period:
+            # Combined tag missing entirely (confirmed: WMT) — fall back to
+            # summing the split current/noncurrent pieces. Only produces a
+            # value for dates where at least one side is present; treats
+            # a genuinely-missing side as 0 rather than dropping the period,
+            # since many balance sheets legitimately have $0 in one of these.
+            current = _collect_instant_facts(us_gaap, _LIABILITIES_CURRENT_TAGS)
+            noncurrent = _collect_instant_facts(us_gaap, _LIABILITIES_NONCURRENT_TAGS)
+            liabilities_by_period = _sum_period_dicts(current, noncurrent)
         cash_by_period = _collect_instant_facts(us_gaap, _CASH_TAGS)
         operating_income_by_period = _collect_duration_facts(us_gaap, _OPERATING_INCOME_TAGS)
         depreciation_by_period = _collect_duration_facts(us_gaap, _DEPRECIATION_TAGS)
@@ -152,6 +167,15 @@ class SECEdgarProvider:
         # used downstream (point-in-time factor scoring, DESIGN.md §8.2).
         report_dates = sorted(net_income_by_period.keys()) or sorted(equity_by_period.keys())
 
+        # Prefetch this ticker's ENTIRE price history in ONE query, not one
+        # per XBRL period — companies with 60-100+ quarters of filing
+        # history were previously triggering that many separate round trips
+        # to Supabase just for the market-cap join, which is genuinely slow
+        # (confirmed 2026-07-13: this is what was making fundamentals runs
+        # feel hung). See _lookup_market_cap() for the in-memory bisect
+        # lookup this enables.
+        price_index = _fetch_price_index(conn, ticker) if conn is not None else None
+
         results = []
         eps_history = []  # for trailing-window earnings_variance, built up in date order
         missing_field_counts = {"roe": 0, "debt_equity": 0, "ev_ebitda": 0, "fcf_yield": 0}
@@ -159,7 +183,10 @@ class SECEdgarProvider:
         # fcf_yield) came back None — this is the ambiguity the original
         # warning couldn't resolve on its own; tracked precisely here so
         # one run gives a definitive answer instead of two guesses.
-        market_cap_failure_reasons = {"no_shares_this_period": 0, "no_price_data": 0, "db_error": 0, "ok": 0}
+        market_cap_failure_reasons = {
+            "no_shares_this_period": 0, "no_price_data": 0, "db_error": 0,
+            "conn_not_provided": 0, "ok": 0,
+        }
 
         for report_date_str in report_dates:
             net_income = net_income_by_period.get(report_date_str)
@@ -181,9 +208,9 @@ class SECEdgarProvider:
                 missing_field_counts["debt_equity"] += 1
 
             if conn is None:
-                market_cap, cap_reason = None, "no_shares_this_period"  # conn intentionally omitted, not a real failure
+                market_cap, cap_reason = None, "conn_not_provided"
             else:
-                market_cap, cap_reason = _get_market_cap(conn, ticker, report_date_str, shares)
+                market_cap, cap_reason = _lookup_market_cap(price_index, report_date_str, shares)
             market_cap_failure_reasons[cap_reason] += 1
 
             ebitda = None
@@ -257,6 +284,18 @@ def _collect_instant_facts(taxonomy: dict, candidate_tags: tuple) -> Dict[str, f
     return _collect_duration_facts(taxonomy, candidate_tags)
 
 
+def _sum_period_dicts(a: Dict[str, float], b: Dict[str, float]) -> Dict[str, float]:
+    """Sums two per-period dicts by date, treating a missing side as 0
+    rather than dropping the period — used for the Liabilities =
+    LiabilitiesCurrent + LiabilitiesNoncurrent fallback. Returns {} if
+    BOTH inputs are empty (nothing to sum), so callers can still tell
+    "no data at all" from "data present, summed to zero"."""
+    if not a and not b:
+        return {}
+    dates = set(a.keys()) | set(b.keys())
+    return {d: a.get(d, 0) + b.get(d, 0) for d in dates}
+
+
 def _nearest(by_period: Dict[str, float], target_date_str: str) -> Optional[float]:
     """Balance-sheet (instant) concepts don't always land on the exact
     same date as the income-statement anchor date — find the closest
@@ -288,9 +327,35 @@ def _trailing_eps_stdev(eps_history: list, up_to_date_str: str) -> Optional[floa
     return statistics.pstdev(window)
 
 
-def _get_market_cap(conn, ticker: str, report_date_str: str, shares_outstanding: Optional[float]):
-    """market_cap = shares outstanding × closing price nearest (at or
-    before) the report date, from this system's own price_history.
+def _fetch_price_index(conn, ticker: str):
+    """ONE query for this ticker's entire price history, sorted ascending —
+    replaces what used to be a separate query per XBRL period (60-100+
+    round trips for companies with long filing histories). Returns
+    (dates, closes) as parallel lists for bisect lookup, or None if the
+    query itself raised (a real DB error, kept distinct from "no rows")."""
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT date, close FROM price_history
+                    WHERE ticker = %s AND close IS NOT NULL
+                    ORDER BY date ASC
+                    """,
+                    (ticker,),
+                )
+                rows = cur.fetchall()
+    except Exception as exc:
+        print(f"ERROR: price_history prefetch failed for {ticker}: {exc}", file=sys.stderr)
+        return None
+    dates = [d.isoformat() for d, _ in rows]
+    closes = [float(c) for _, c in rows]
+    return dates, closes
+
+
+def _lookup_market_cap(price_index, report_date_str: str, shares_outstanding: Optional[float]):
+    """In-memory nearest-at-or-before lookup against the prefetched price
+    index — O(log n) via bisect instead of a database round trip.
 
     Returns (market_cap, reason). `reason` is one of:
       - "ok"                    market cap computed successfully
@@ -302,39 +367,29 @@ def _get_market_cap(conn, ticker: str, report_date_str: str, shares_outstanding:
                                  has no row at or before this date for this
                                  ticker (common mid-backfill, or if the
                                  report date predates the backfill window)
-      - "db_error"              the query itself raised — see the printed
-                                 exception the first time this happens for
-                                 a ticker, since silently swallowing this
+      - "db_error"              the prefetch query raised — see the printed
+                                 exception, since silently swallowing this
                                  would turn a real bug into "no data"
     """
     if not shares_outstanding:
         return None, "no_shares_this_period"
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT close FROM price_history
-                    WHERE ticker = %s AND date <= %s
-                    ORDER BY date DESC LIMIT 1
-                    """,
-                    (ticker, report_date_str),
-                )
-                row = cur.fetchone()
-    except Exception as exc:
-        print(f"ERROR: price_history lookup failed for {ticker} @ {report_date_str}: {exc}", file=sys.stderr)
+    if price_index is None:
         return None, "db_error"
-    if not row or row[0] is None:
+    dates, closes = price_index
+    if not dates:
         return None, "no_price_data"
-    return float(row[0]) * shares_outstanding, "ok"
+    idx = bisect.bisect_right(dates, report_date_str) - 1
+    if idx < 0:
+        return None, "no_price_data"
+    return closes[idx] * shares_outstanding, "ok"
 
 
 def _warn_if_market_cap_mostly_failed(ticker: str, reasons: dict, shares_source: str, total_periods: int):
     """Resolves the ambiguity the original ev_ebitda/fcf_yield warning
     couldn't: prints exactly which failure mode dominated, so this is
     diagnosable from one run instead of two guesses."""
-    if total_periods == 0 or reasons["ok"] > 0:
-        return  # at least some periods worked — not worth flagging
+    if total_periods == 0 or reasons["ok"] > 0 or reasons["conn_not_provided"] == total_periods:
+        return  # at least some periods worked, or conn was intentionally omitted — nothing to flag
     if reasons["no_shares_this_period"] == total_periods:
         print(
             f"WARNING: market cap never computed for {ticker} — no shares-outstanding "
