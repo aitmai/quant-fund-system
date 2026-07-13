@@ -19,6 +19,12 @@ class TestProviderFallback(unittest.TestCase):
     # provider_factory.py looks classes up via that dict, built once at import
     # time, so patching the module-level names it was built from has no effect.
 
+    def setUp(self):
+        provider_factory.reset_circuit_breaker()
+
+    def tearDown(self):
+        provider_factory.reset_circuit_breaker()
+
     def test_active_provider_succeeds_no_fallback_needed(self):
         conn = _fake_conn(active_provider="yfinance")
         mock_yf_instance = MagicMock()
@@ -88,6 +94,65 @@ class TestProviderFallback(unittest.TestCase):
         ):
             bars, provider_used = provider_factory.fetch_with_fallback(conn, "MSFT", date(2026, 1, 1))
         self.assertEqual(provider_used, "tiingo")
+
+    def test_rate_limited_provider_is_skipped_on_subsequent_tickers(self):
+        # First ticker: yfinance fails (not rate-limit-flavored), Tiingo
+        # fails with a rate-limit error -> Tiingo should be circuit-broken.
+        conn = _fake_conn(active_provider="yfinance")
+        mock_yf_instance = MagicMock()
+        mock_yf_instance.fetch_history.side_effect = PriceProviderError("throttled", retryable=True)
+        mock_tiingo_instance = MagicMock()
+        mock_tiingo_instance.fetch_history.side_effect = PriceProviderError(
+            "Tiingo rate limit hit fetching X", retryable=True
+        )
+
+        with patch.dict(
+            provider_factory.PROVIDER_CLASSES,
+            {
+                "yfinance": MagicMock(return_value=mock_yf_instance),
+                "tiingo": MagicMock(return_value=mock_tiingo_instance),
+            },
+        ):
+            with self.assertRaises(PriceProviderError):
+                provider_factory.fetch_with_fallback(conn, "FIRST", date(2026, 1, 1))
+
+            self.assertIn("tiingo", provider_factory._rate_limited_providers)
+
+            # Second ticker: yfinance fails again, but Tiingo should be
+            # skipped entirely this time — never called again this run.
+            mock_yf_instance.fetch_history.side_effect = PriceProviderError("throttled", retryable=True)
+            mock_tiingo_instance.fetch_history.reset_mock(side_effect=True)
+            with self.assertRaises(PriceProviderError):
+                provider_factory.fetch_with_fallback(conn, "SECOND", date(2026, 1, 1))
+
+            mock_tiingo_instance.fetch_history.assert_not_called()
+
+    def test_non_rate_limit_error_does_not_trip_circuit_breaker(self):
+        conn = _fake_conn(active_provider="tiingo")
+        mock_tiingo_instance = MagicMock()
+        mock_tiingo_instance.fetch_history.side_effect = PriceProviderError(
+            "Tiingo has no data for BADTICKER (404)", retryable=False
+        )
+        mock_yf_instance = MagicMock()
+        mock_yf_instance.fetch_history.return_value = [
+            PriceBar("X", date(2026, 1, 2), 1, 2, 0.5, 1.5, 1.5, 1000)
+        ]
+
+        with patch.dict(
+            provider_factory.PROVIDER_CLASSES,
+            {
+                "tiingo": MagicMock(return_value=mock_tiingo_instance),
+                "yfinance": MagicMock(return_value=mock_yf_instance),
+            },
+        ):
+            provider_factory.fetch_with_fallback(conn, "BADTICKER", date(2026, 1, 1))
+
+        self.assertNotIn("tiingo", provider_factory._rate_limited_providers)
+
+    def test_reset_circuit_breaker_clears_state(self):
+        provider_factory._rate_limited_providers.add("tiingo")
+        provider_factory.reset_circuit_breaker()
+        self.assertEqual(provider_factory._rate_limited_providers, set())
 
 
 if __name__ == "__main__":

@@ -9,6 +9,16 @@ try the other one before giving up on that ticker for the day. Which
 provider actually served the data is recorded per-ticker in
 ingestion_state.last_provider_used, so the GUI can show it, not just
 control it.
+
+Circuit breaker: once a provider reports a rate-limit error, it's
+disabled for the REST OF THIS PROCESS (not persisted — a fresh cron run
+tomorrow starts clean). Without this, a bad yfinance stretch cascades
+into a fallback call to Tiingo for every single failed ticker — and
+Tiingo's free tier (~50 req/hour) gets exhausted in minutes, after which
+every further fallback attempt just fails too, burning time and quota
+for zero benefit. Once we know a provider is rate-limited, there's
+nothing to gain from calling it again until the limit window resets,
+which won't happen mid-run.
 """
 
 import sys
@@ -23,6 +33,20 @@ PROVIDER_CLASSES = {
     "tiingo": TiingoProvider,
     "yfinance": YFinanceProvider,
 }
+
+# Module-level, per-process only — intentionally not persisted anywhere.
+_rate_limited_providers: set = set()
+
+
+def reset_circuit_breaker():
+    """Clears the rate-limited-provider set. Exists for test isolation and
+    for long-lived processes that might want to retry after a cooldown —
+    normal cron usage (one short-lived process per run) never needs this."""
+    _rate_limited_providers.clear()
+
+
+def _looks_like_rate_limit(exc: PriceProviderError) -> bool:
+    return "rate limit" in str(exc).lower()
 
 
 def get_active_provider_name(conn) -> str:
@@ -61,7 +85,7 @@ def fetch_with_fallback(
     and falling back to the other one on retryable failure.
 
     Returns (bars, provider_name_used). Raises PriceProviderError only if
-    BOTH providers fail.
+    BOTH providers fail (or are circuit-broken).
     """
     active_name = get_active_provider_name(conn)
     fallback_name = next((n for n in PROVIDER_CLASSES if n != active_name), None)
@@ -70,6 +94,14 @@ def fetch_with_fallback(
     last_error: Optional[PriceProviderError] = None
 
     for name in ordered_names:
+        if name in _rate_limited_providers:
+            print(
+                f"INFO: skipping provider '{name}' for {ticker} — "
+                f"already rate-limited earlier this run.",
+                file=sys.stderr,
+            )
+            continue
+
         provider = _instantiate(name)
         if provider is None:
             continue
@@ -78,6 +110,13 @@ def fetch_with_fallback(
             return bars, name
         except PriceProviderError as exc:
             last_error = exc
+            if _looks_like_rate_limit(exc):
+                _rate_limited_providers.add(name)
+                print(
+                    f"WARNING: provider '{name}' hit a rate limit — disabling it "
+                    f"for the rest of this run (won't retry until the next scheduled run).",
+                    file=sys.stderr,
+                )
             print(
                 f"INFO: provider '{name}' failed for {ticker} "
                 f"(retryable={exc.retryable}): {exc}. "
