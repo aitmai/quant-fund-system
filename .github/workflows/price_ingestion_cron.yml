@@ -18,7 +18,8 @@ on:
     # cron stacks up. Runs every day, not just weekdays — maintenance
     # fetches for already-backfilled tickers are cheap either way, and
     # skipping weekends adds complexity for negligible budget savings.
-    - cron: "30 13 * * *"
+    # - cron: "30 13 * * *"
+    - cron: "0 * * * *"
   workflow_dispatch: {}
 
 jobs:
