@@ -133,8 +133,12 @@ class SECEdgarProvider:
         capex_by_period = _collect_duration_facts(us_gaap, _CAPEX_TAGS)
         eps_by_period = _collect_duration_facts(us_gaap, _EPS_TAGS)
         shares_by_period = _collect_instant_facts(us_gaap, _SHARES_OUTSTANDING_TAGS)
+        shares_source = "us-gaap"
         if not shares_by_period:
             shares_by_period = _collect_instant_facts(dei, _SHARES_OUTSTANDING_DEI_TAGS)
+            shares_source = "dei"
+        if not shares_by_period:
+            shares_source = "none found"
 
         if not net_income_by_period and not equity_by_period and not eps_by_period:
             raise PriceProviderError(
@@ -151,6 +155,11 @@ class SECEdgarProvider:
         results = []
         eps_history = []  # for trailing-window earnings_variance, built up in date order
         missing_field_counts = {"roe": 0, "debt_equity": 0, "ev_ebitda": 0, "fcf_yield": 0}
+        # Diagnostic breakdown for WHY market cap (and therefore ev_ebitda/
+        # fcf_yield) came back None — this is the ambiguity the original
+        # warning couldn't resolve on its own; tracked precisely here so
+        # one run gives a definitive answer instead of two guesses.
+        market_cap_failure_reasons = {"no_shares_this_period": 0, "no_price_data": 0, "db_error": 0, "ok": 0}
 
         for report_date_str in report_dates:
             net_income = net_income_by_period.get(report_date_str)
@@ -171,7 +180,11 @@ class SECEdgarProvider:
             if debt_equity is None:
                 missing_field_counts["debt_equity"] += 1
 
-            market_cap = _get_market_cap(conn, ticker, report_date_str, shares) if conn is not None else None
+            if conn is None:
+                market_cap, cap_reason = None, "no_shares_this_period"  # conn intentionally omitted, not a real failure
+            else:
+                market_cap, cap_reason = _get_market_cap(conn, ticker, report_date_str, shares)
+            market_cap_failure_reasons[cap_reason] += 1
 
             ebitda = None
             if op_income is not None:
@@ -213,6 +226,7 @@ class SECEdgarProvider:
             )
 
         _warn_if_mostly_missing(ticker, missing_field_counts, len(results))
+        _warn_if_market_cap_mostly_failed(ticker, market_cap_failure_reasons, shares_source, len(results))
         return results
 
 
@@ -274,14 +288,27 @@ def _trailing_eps_stdev(eps_history: list, up_to_date_str: str) -> Optional[floa
     return statistics.pstdev(window)
 
 
-def _get_market_cap(conn, ticker: str, report_date_str: str, shares_outstanding: Optional[float]) -> Optional[float]:
+def _get_market_cap(conn, ticker: str, report_date_str: str, shares_outstanding: Optional[float]):
     """market_cap = shares outstanding × closing price nearest (at or
-    before) the report date, from this system's own price_history. Falls
-    back to None (not an error) if price_history has no data yet for
-    that ticker/date — common mid-backfill, shouldn't block the rest of
-    the row's fields."""
-    if not shares_outstanding or not conn:
-        return None
+    before) the report date, from this system's own price_history.
+
+    Returns (market_cap, reason). `reason` is one of:
+      - "ok"                    market cap computed successfully
+      - "no_shares_this_period" no shares-outstanding XBRL value for this
+                                 specific period (may still have one for
+                                 OTHER periods — this is per-period, not
+                                 "this company has no shares data at all")
+      - "no_price_data"         shares were available, but price_history
+                                 has no row at or before this date for this
+                                 ticker (common mid-backfill, or if the
+                                 report date predates the backfill window)
+      - "db_error"              the query itself raised — see the printed
+                                 exception the first time this happens for
+                                 a ticker, since silently swallowing this
+                                 would turn a real bug into "no data"
+    """
+    if not shares_outstanding:
+        return None, "no_shares_this_period"
     try:
         with conn:
             with conn.cursor() as cur:
@@ -294,11 +321,43 @@ def _get_market_cap(conn, ticker: str, report_date_str: str, shares_outstanding:
                     (ticker, report_date_str),
                 )
                 row = cur.fetchone()
-    except Exception:
-        return None
+    except Exception as exc:
+        print(f"ERROR: price_history lookup failed for {ticker} @ {report_date_str}: {exc}", file=sys.stderr)
+        return None, "db_error"
     if not row or row[0] is None:
-        return None
-    return float(row[0]) * shares_outstanding
+        return None, "no_price_data"
+    return float(row[0]) * shares_outstanding, "ok"
+
+
+def _warn_if_market_cap_mostly_failed(ticker: str, reasons: dict, shares_source: str, total_periods: int):
+    """Resolves the ambiguity the original ev_ebitda/fcf_yield warning
+    couldn't: prints exactly which failure mode dominated, so this is
+    diagnosable from one run instead of two guesses."""
+    if total_periods == 0 or reasons["ok"] > 0:
+        return  # at least some periods worked — not worth flagging
+    if reasons["no_shares_this_period"] == total_periods:
+        print(
+            f"WARNING: market cap never computed for {ticker} — no shares-outstanding "
+            f"XBRL value found for ANY period (shares source checked: {shares_source}). "
+            f"This company's filings may tag shares outstanding under a concept not in "
+            f"_SHARES_OUTSTANDING_TAGS/_SHARES_OUTSTANDING_DEI_TAGS.",
+            file=sys.stderr,
+        )
+    elif reasons["no_price_data"] == total_periods:
+        print(
+            f"WARNING: market cap never computed for {ticker} — shares outstanding WAS "
+            f"found, but price_history has no matching rows for this ticker at any of "
+            f"the {total_periods} report dates. Check price ingestion actually succeeded "
+            f"for {ticker} (SELECT count(*) FROM price_history WHERE ticker = '{ticker}').",
+            file=sys.stderr,
+        )
+    elif reasons["db_error"] > 0:
+        print(
+            f"WARNING: market cap lookup hit a database error for {ticker} on "
+            f"{reasons['db_error']}/{total_periods} periods — see the ERROR line(s) above "
+            f"for the actual exception.",
+            file=sys.stderr,
+        )
 
 
 def _warn_if_mostly_missing(ticker: str, missing_counts: dict, total_periods: int):

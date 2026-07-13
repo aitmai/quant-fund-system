@@ -221,5 +221,85 @@ class TestSECEdgarProvider(unittest.TestCase):
         self.assertTrue(warning_calls)
 
 
+    @patch("src.providers.sec_edgar_provider.print")
+    @patch.object(SECEdgarProvider, "_fetch_company_facts")
+    def test_diagnoses_no_shares_outstanding_at_all(self, mock_fetch, mock_print):
+        # No shares tag anywhere -> should name that specifically, not
+        # leave it ambiguous with a price_history explanation.
+        mock_fetch.return_value = _fake_company_facts(
+            net_income=[("2025-10-01", "2025-12-31", 1000000)],
+            equity=[("2025-12-31", 10000000)],
+            op_income=[("2025-10-01", "2025-12-31", 1200000)],
+            # no shares=... passed
+        )
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.fetchone.return_value = (100.0,)
+        conn.cursor.return_value.__enter__.return_value = cursor
+
+        self.provider.fetch_fundamentals("TEST", "0000320193", conn=conn)
+
+        printed = " ".join(str(c) for c in mock_print.call_args_list)
+        self.assertIn("no shares-outstanding XBRL value found", printed)
+
+    @patch("src.providers.sec_edgar_provider.print")
+    @patch.object(SECEdgarProvider, "_fetch_company_facts")
+    def test_diagnoses_no_price_history_when_shares_present(self, mock_fetch, mock_print):
+        # Shares ARE present, but price_history has nothing -> should name
+        # THAT specifically, not blame missing XBRL data.
+        mock_fetch.return_value = _fake_company_facts(
+            net_income=[("2025-10-01", "2025-12-31", 1000000)],
+            equity=[("2025-12-31", 10000000)],
+            op_income=[("2025-10-01", "2025-12-31", 1200000)],
+            shares=[("2025-12-31", 1000)],
+        )
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.fetchone.return_value = None  # no price_history row at all
+        conn.cursor.return_value.__enter__.return_value = cursor
+
+        self.provider.fetch_fundamentals("TEST", "0000320193", conn=conn)
+
+        printed = " ".join(str(c) for c in mock_print.call_args_list)
+        self.assertIn("price_history has no matching rows", printed)
+
+    @patch("src.providers.sec_edgar_provider.print")
+    @patch.object(SECEdgarProvider, "_fetch_company_facts")
+    def test_diagnoses_db_error_distinctly_and_logs_the_exception(self, mock_fetch, mock_print):
+        mock_fetch.return_value = _fake_company_facts(
+            net_income=[("2025-10-01", "2025-12-31", 1000000)],
+            equity=[("2025-12-31", 10000000)],
+            op_income=[("2025-10-01", "2025-12-31", 1200000)],
+            shares=[("2025-12-31", 1000)],
+        )
+        conn = MagicMock()
+        conn.cursor.side_effect = RuntimeError("connection is closed")
+
+        self.provider.fetch_fundamentals("TEST", "0000320193", conn=conn)
+
+        printed = " ".join(str(c) for c in mock_print.call_args_list)
+        self.assertIn("database error", printed)
+        self.assertIn("connection is closed", printed)
+
+    @patch("src.providers.sec_edgar_provider.print")
+    @patch.object(SECEdgarProvider, "_fetch_company_facts")
+    def test_no_warning_when_at_least_some_periods_succeed(self, mock_fetch, mock_print):
+        mock_fetch.return_value = _fake_company_facts(
+            net_income=[("2025-10-01", "2025-12-31", 1000000)],
+            equity=[("2025-12-31", 10000000)],
+            op_income=[("2025-10-01", "2025-12-31", 1200000)],
+            shares=[("2025-12-31", 1000)],
+        )
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.fetchone.return_value = (100.0,)
+        conn.cursor.return_value.__enter__.return_value = cursor
+
+        self.provider.fetch_fundamentals("TEST", "0000320193", conn=conn)
+
+        printed = " ".join(str(c) for c in mock_print.call_args_list)
+        self.assertNotIn("market cap never computed", printed)
+
+
 if __name__ == "__main__":
     unittest.main()
