@@ -1,0 +1,27 @@
+# Phase 0 milestone (DESIGN.md §13): proves GitHub -> Supabase works end to end.
+# Trigger manually from the Actions tab once secrets are set, or it runs on every push to main.
+name: phase0-hello-world
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+
+jobs:
+  test-connection:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Test Supabase connection
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python scripts/test_connection.py

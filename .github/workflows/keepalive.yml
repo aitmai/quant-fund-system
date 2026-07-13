@@ -1,0 +1,32 @@
+# Keep-alive commit (DESIGN.md §8.4, fix #1).
+# GitHub disables schedule-triggered workflows after 60 days with no commits
+# to the repo. This runs monthly and makes a trivial commit purely to reset
+# that clock — unrelated to Supabase's own separate keep-alive concern (§5).
+name: monthly-keepalive
+
+on:
+  schedule:
+    - cron: "0 6 1 * *"  # 06:00 UTC on the 1st of every month
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  keepalive-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Bump keepalive timestamp
+        run: |
+          mkdir -p .github/keepalive
+          date -u +"%Y-%m-%dT%H:%M:%SZ" > .github/keepalive/last_ping.txt
+
+      - name: Commit and push
+        run: |
+          git config user.name "aitmai-keepalive-bot"
+          git config user.email "actions@github.com"
+          git add .github/keepalive/last_ping.txt
+          git diff --staged --quiet || git commit -m "chore: monthly keepalive ping"
+          git push

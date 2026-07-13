@@ -1,0 +1,46 @@
+# Phase 1 daily ingestion (DESIGN.md §5, §7): backfill-then-maintenance
+# for price_history and fundamentals, each against its own daily budget.
+# Runs on GitHub's free public runners — no paid worker needed (DESIGN.md §8.4
+# established that pattern for the backtest engine; this reuses it here).
+name: daily-ingestion
+
+on:
+  schedule:
+    # 13:30 UTC = after US market close settles, before next day's cron stacks up.
+    # Runs every day (not just weekdays) since fundamentals/maintenance work
+    # doesn't strictly need to skip weekends, and skipping adds complexity for
+    # negligible budget savings.
+    - cron: "30 13 * * *"
+  workflow_dispatch:
+    inputs:
+      only:
+        description: "Limit to one data type (leave blank for both)"
+        required: false
+        type: choice
+        options: ["", "price", "fundamentals"]
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run ingestion cron
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+          TIINGO_API_KEY: ${{ secrets.TIINGO_API_KEY }}
+        run: |
+          if [ -n "${{ github.event.inputs.only }}" ]; then
+            python scripts/run_ingestion_cron.py --only "${{ github.event.inputs.only }}"
+          else
+            python scripts/run_ingestion_cron.py
+          fi

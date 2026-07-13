@@ -1,0 +1,45 @@
+# Phase 1 universe reconciliation (DESIGN.md §3 Stage 1, §7: "Monthly +
+# event-driven"). Diffs current S&P 500 (and optionally Russell 1000)
+# constituents against the `universe` table, tagging changes in
+# `universe_changes`. Manual ticker uploads and ad-hoc runs use
+# scripts/run_universe_sync.py / upload_manual_tickers.py directly —
+# this workflow only covers the scheduled path.
+name: monthly-universe-sync
+
+on:
+  schedule:
+    # 07:00 UTC on the 2nd of each month — after the keepalive commit,
+    # comfortably clear of month-end index rebalance settlement.
+    - cron: "0 7 2 * *"
+  workflow_dispatch:
+    inputs:
+      include_russell1000:
+        description: "Also attempt Russell 1000 sync (best-effort, see src/universe/index_sources.py)"
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run universe sync
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+        run: |
+          if [ "${{ github.event.inputs.include_russell1000 }}" = "true" ]; then
+            python scripts/run_universe_sync.py --include-russell1000 --apply-liquidity-filter
+          else
+            python scripts/run_universe_sync.py --apply-liquidity-filter
+          fi

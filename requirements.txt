@@ -1,0 +1,23 @@
+# Pinned exact versions — DESIGN.md §8.4 fix #6.
+# A multi-year backtest can span days-to-weeks of wall-clock time across many
+# short GitHub Actions runs. An unpinned dependency update landing mid-backtest
+# would mean different segments train under subtly different library behavior,
+# silently breaking reproducibility. Update deliberately, never implicitly.
+
+Flask==3.0.3
+psycopg2-binary==2.9.9
+python-dotenv==1.0.1
+requests==2.32.3
+
+# Data providers
+yfinance==0.2.40
+
+# Modeling (Phase 2/3)
+numpy==1.26.4
+pandas==2.2.2
+scikit-learn==1.5.0
+scipy==1.13.1
+arch==7.0.0          # GARCH modeling for the hedge sleeve, DESIGN.md §3
+
+# Supabase client (optional — direct psycopg2 to DATABASE_URL also works)
+supabase==2.5.1

@@ -1,0 +1,37 @@
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# OS/editor cruft
+.DS_Store
+.vscode/
+.idea/
+
+# Fetched market data must NEVER land in the repo (DESIGN.md §8.4, fix #3).
+# This is a defensive backstop only — the real guarantee is architectural:
+# no ingestion or backtest code path writes fetched data anywhere under
+# this repo directory. All fetched data goes to Supabase Postgres/Storage.
+data/
+cache/
+*.csv
+*.parquet
+
+# Model artifacts belong in Supabase Storage, not local disk (DESIGN.md §8.4)
+models/
+*.pkl
+*.joblib
+
+# Auto-added by gitpush.py
+credentials.json
+*.pyo
+secrets.json
+service_account.json
+token.json
