@@ -61,12 +61,36 @@ _LIABILITIES_NONCURRENT_TAGS = ("LiabilitiesNoncurrent",)
 _CASH_TAGS = ("CashAndCashEquivalentsAtCarryingValue", "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents")
 _OPERATING_INCOME_TAGS = ("OperatingIncomeLoss",)
 _DEPRECIATION_TAGS = ("DepreciationDepletionAndAmortization", "DepreciationAmortizationAndAccretionNet", "Depreciation")
+# EBITDA fallback when OperatingIncomeLoss isn't tagged at all (confirmed:
+# WDAY — common for SaaS/tech companies whose income statement structure
+# doesn't cleanly break out an "operating income" line). Bottom-up
+# formula: NetIncome + Interest + Tax + D&A. Missing pieces default to 0
+# rather than blocking the whole calc, same convention as depreciation
+# above — only NetIncome is treated as required.
+_INTEREST_EXPENSE_TAGS = ("InterestExpense", "InterestExpenseDebt", "InterestIncomeExpenseNet")
+_INCOME_TAX_TAGS = ("IncomeTaxExpenseBenefit",)
 _OPERATING_CASH_FLOW_TAGS = ("NetCashProvidedByUsedInOperatingActivities",)
 _CAPEX_TAGS = ("PaymentsToAcquirePropertyPlantAndEquipment", "PaymentsForCapitalImprovements")
 _EPS_TAGS = ("EarningsPerShareDiluted", "EarningsPerShareBasic")
 _SHARES_OUTSTANDING_TAGS = ("CommonStockSharesOutstanding", "CommonStockSharesIssued")
 # Shares outstanding is often only in the `dei` taxonomy, not `us-gaap`.
 _SHARES_OUTSTANDING_DEI_TAGS = ("EntityCommonStockSharesOutstanding",)
+# Last-resort fallback for multi-class-stock companies (confirmed gap:
+# CVNA/Carvana has Class A + Class B stock and no combined point-in-time
+# share count surfaced under any tag above — plausibly because EDGAR's
+# companyfacts/companyconcept APIs only aggregate STANDARD-taxonomy facts,
+# and a dual-class entity total may only exist as a company-specific
+# custom-taxonomy extension, which these APIs don't expose at all; see
+# https://www.sec.gov/search-filings/edgar-application-programming-interfaces).
+# Weighted-average diluted share count is a real, if approximate,
+# substitute — it's the AVERAGE during the period rather than the
+# point-in-time count, so market cap computed from it is an approximation,
+# not exact. Better than nothing for otherwise-unavailable companies;
+# flagged honestly rather than silently presented as equally precise.
+_SHARES_OUTSTANDING_WEIGHTED_AVG_TAGS = (
+    "WeightedAverageNumberOfDilutedSharesOutstanding",
+    "WeightedAverageNumberOfSharesOutstandingBasic",
+)
 
 
 def _pad_cik(cik: str) -> str:
@@ -144,6 +168,8 @@ class SECEdgarProvider:
         cash_by_period = _collect_instant_facts(us_gaap, _CASH_TAGS)
         operating_income_by_period = _collect_duration_facts(us_gaap, _OPERATING_INCOME_TAGS)
         depreciation_by_period = _collect_duration_facts(us_gaap, _DEPRECIATION_TAGS)
+        interest_expense_by_period = _collect_duration_facts(us_gaap, _INTEREST_EXPENSE_TAGS)
+        income_tax_by_period = _collect_duration_facts(us_gaap, _INCOME_TAX_TAGS)
         operating_cash_flow_by_period = _collect_duration_facts(us_gaap, _OPERATING_CASH_FLOW_TAGS)
         capex_by_period = _collect_duration_facts(us_gaap, _CAPEX_TAGS)
         eps_by_period = _collect_duration_facts(us_gaap, _EPS_TAGS)
@@ -152,6 +178,13 @@ class SECEdgarProvider:
         if not shares_by_period:
             shares_by_period = _collect_instant_facts(dei, _SHARES_OUTSTANDING_DEI_TAGS)
             shares_source = "dei"
+        if not shares_by_period:
+            # Weighted-average is a DURATION concept, not instant — approximates
+            # a point-in-time count but isn't one. Used only because nothing
+            # more precise was found; flagged via shares_source so it's
+            # traceable if the resulting market cap looks off.
+            shares_by_period = _collect_duration_facts(us_gaap, _SHARES_OUTSTANDING_WEIGHTED_AVG_TAGS)
+            shares_source = "weighted-average (approximate)"
         if not shares_by_period:
             shares_source = "none found"
 
@@ -187,6 +220,14 @@ class SECEdgarProvider:
             "no_shares_this_period": 0, "no_price_data": 0, "db_error": 0,
             "conn_not_provided": 0, "ok": 0,
         }
+        # Market cap succeeding doesn't mean ev_ebitda/fcf_yield succeed —
+        # both need additional inputs (operating income, liabilities, cash
+        # flow). Tracked separately so "market cap was fine, something ELSE
+        # was missing" (confirmed cases: WDAY, ICE, PODD) gets its own
+        # diagnosis instead of silently falling through to the generic
+        # "field was None for ALL periods" message with no explanation.
+        ev_ebitda_failure_reasons = {"no_market_cap": 0, "no_operating_income": 0, "no_liabilities": 0, "ok": 0}
+        fcf_yield_failure_reasons = {"no_market_cap": 0, "no_operating_cash_flow": 0, "ok": 0}
 
         for report_date_str in report_dates:
             net_income = net_income_by_period.get(report_date_str)
@@ -198,7 +239,7 @@ class SECEdgarProvider:
             op_cash_flow = operating_cash_flow_by_period.get(report_date_str)
             capex = capex_by_period.get(report_date_str)
             eps = eps_by_period.get(report_date_str)
-            shares = _nearest(shares_by_period, report_date_str)
+            shares = _nearest_shares(shares_by_period, report_date_str)
 
             roe = _safe_divide(net_income, equity)
             debt_equity = _safe_divide(liabilities, equity)  # broad definition: total liabilities / equity
@@ -213,15 +254,33 @@ class SECEdgarProvider:
                 market_cap, cap_reason = _lookup_market_cap(price_index, report_date_str, shares)
             market_cap_failure_reasons[cap_reason] += 1
 
+            interest_expense = interest_expense_by_period.get(report_date_str)
+            income_tax = income_tax_by_period.get(report_date_str)
+
             ebitda = None
             if op_income is not None:
                 ebitda = op_income + (depreciation or 0)
+            elif net_income is not None:
+                # Bottom-up fallback when OperatingIncomeLoss isn't tagged
+                # at all (confirmed: WDAY, ICE, PODD — SaaS/tech companies
+                # whose income statement doesn't cleanly break out an
+                # "operating income" line). NetIncome + Interest + Tax +
+                # D&A is a standard alternate EBITDA formula.
+                ebitda = net_income + (interest_expense or 0) + (income_tax or 0) + (depreciation or 0)
             ev_ebitda = None
             if market_cap is not None and ebitda not in (None, 0) and liabilities is not None:
                 enterprise_value = market_cap + liabilities - (cash or 0)
                 ev_ebitda = _safe_divide(enterprise_value, ebitda)
             if ev_ebitda is None:
                 missing_field_counts["ev_ebitda"] += 1
+                if market_cap is None:
+                    ev_ebitda_failure_reasons["no_market_cap"] += 1
+                elif ebitda in (None, 0):
+                    ev_ebitda_failure_reasons["no_operating_income"] += 1
+                else:
+                    ev_ebitda_failure_reasons["no_liabilities"] += 1
+            else:
+                ev_ebitda_failure_reasons["ok"] += 1
 
             fcf_yield = None
             if market_cap not in (None, 0) and op_cash_flow is not None:
@@ -229,6 +288,12 @@ class SECEdgarProvider:
                 fcf_yield = _safe_divide(fcf, market_cap)
             if fcf_yield is None:
                 missing_field_counts["fcf_yield"] += 1
+                if market_cap in (None, 0):
+                    fcf_yield_failure_reasons["no_market_cap"] += 1
+                else:
+                    fcf_yield_failure_reasons["no_operating_cash_flow"] += 1
+            else:
+                fcf_yield_failure_reasons["ok"] += 1
 
             if eps is not None:
                 eps_history.append((report_date_str, eps))
@@ -253,7 +318,11 @@ class SECEdgarProvider:
             )
 
         _warn_if_mostly_missing(ticker, missing_field_counts, len(results))
-        _warn_if_market_cap_mostly_failed(ticker, market_cap_failure_reasons, shares_source, len(results))
+        _warn_if_market_cap_mostly_failed(
+            ticker, market_cap_failure_reasons, shares_source, len(results), shares_by_period, report_dates
+        )
+        _warn_if_ev_ebitda_mostly_failed(ticker, ev_ebitda_failure_reasons, len(results))
+        _warn_if_fcf_yield_mostly_failed(ticker, fcf_yield_failure_reasons, len(results))
         return results
 
 
@@ -309,6 +378,37 @@ def _nearest(by_period: Dict[str, float], target_date_str: str) -> Optional[floa
     if not candidates:
         return None
     return by_period[max(candidates)]
+
+
+def _nearest_shares(by_period: Dict[str, float], target_date_str: str, max_days_tolerance: int = 45) -> Optional[float]:
+    """Shares-outstanding specifically needs a DIFFERENT search direction
+    than _nearest(): cover-page disclosures (dei:EntityCommonStockSharesOutstanding)
+    are dated shortly AFTER the fiscal period end (confirmed against a live
+    AAPL response: shares dated 2009-10-16 for a period ending 2009-09-26),
+    not at/before it like true balance-sheet facts. _nearest()'s at-or-before
+    logic systematically finds nothing for any company relying on this tag
+    (confirmed real case: CVNA) — this searches both directions instead,
+    picking whichever date is closest in absolute terms, within a tolerance
+    window (share counts don't meaningfully change day-to-day, so a nearby
+    date either direction is a reasonable stand-in)."""
+    if not by_period:
+        return None
+    if target_date_str in by_period:
+        return by_period[target_date_str]
+    try:
+        target = date.fromisoformat(target_date_str[:10])
+    except ValueError:
+        return None
+    best_date_str, best_diff = None, None
+    for d in by_period:
+        try:
+            d_date = date.fromisoformat(d[:10])
+        except ValueError:
+            continue
+        diff = abs((d_date - target).days)
+        if diff <= max_days_tolerance and (best_diff is None or diff < best_diff):
+            best_diff, best_date_str = diff, d
+    return by_period[best_date_str] if best_date_str is not None else None
 
 
 def _safe_divide(numerator, denominator):
@@ -384,20 +484,81 @@ def _lookup_market_cap(price_index, report_date_str: str, shares_outstanding: Op
     return closes[idx] * shares_outstanding, "ok"
 
 
-def _warn_if_market_cap_mostly_failed(ticker: str, reasons: dict, shares_source: str, total_periods: int):
+def _warn_if_ev_ebitda_mostly_failed(ticker: str, reasons: dict, total_periods: int):
+    """Covers the case market cap succeeds but ev_ebitda still fails for
+    every period (confirmed: WDAY, ICE, PODD) — the market-cap-specific
+    warning above correctly stays silent in that case (market cap DID
+    work), which otherwise left this failure mode with no diagnosis at
+    all beyond the generic 'field was None' message."""
+    if total_periods == 0 or reasons["ok"] > 0:
+        return
+    if reasons["no_market_cap"] == total_periods:
+        return  # already covered by _warn_if_market_cap_mostly_failed
+    if reasons["no_operating_income"] == total_periods:
+        print(
+            f"WARNING: ev_ebitda never computed for {ticker} — market cap was fine, but "
+            f"neither OperatingIncomeLoss NOR the NetIncome+Interest+Tax+D&A fallback "
+            f"produced a usable EBITDA for ANY period. This company's filings likely "
+            f"don't tag NetIncomeLoss/ProfitLoss either, or EBITDA computed to exactly 0.",
+            file=sys.stderr,
+        )
+    elif reasons["no_liabilities"] == total_periods:
+        print(
+            f"WARNING: ev_ebitda never computed for {ticker} — market cap and operating "
+            f"income were fine, but no Liabilities value (combined or current+noncurrent "
+            f"sum) found for ANY period.",
+            file=sys.stderr,
+        )
+
+
+def _warn_if_fcf_yield_mostly_failed(ticker: str, reasons: dict, total_periods: int):
+    """Same as _warn_if_ev_ebitda_mostly_failed, for fcf_yield's other
+    input (operating cash flow) when market cap wasn't the problem."""
+    if total_periods == 0 or reasons["ok"] > 0:
+        return
+    if reasons["no_market_cap"] == total_periods:
+        return  # already covered by _warn_if_market_cap_mostly_failed
+    print(
+        f"WARNING: fcf_yield never computed for {ticker} — market cap was fine, but no "
+        f"NetCashProvidedByUsedInOperatingActivities XBRL value found for ANY period. "
+        f"This company's filings may tag operating cash flow under a different concept.",
+        file=sys.stderr,
+    )
+
+
+def _warn_if_market_cap_mostly_failed(
+    ticker: str, reasons: dict, shares_source: str, total_periods: int,
+    shares_by_period: Dict[str, float] = None, report_dates: list = None,
+):
     """Resolves the ambiguity the original ev_ebitda/fcf_yield warning
     couldn't: prints exactly which failure mode dominated, so this is
     diagnosable from one run instead of two guesses."""
     if total_periods == 0 or reasons["ok"] > 0 or reasons["conn_not_provided"] == total_periods:
         return  # at least some periods worked, or conn was intentionally omitted — nothing to flag
     if reasons["no_shares_this_period"] == total_periods:
-        print(
-            f"WARNING: market cap never computed for {ticker} — no shares-outstanding "
-            f"XBRL value found for ANY period (shares source checked: {shares_source}). "
-            f"This company's filings may tag shares outstanding under a concept not in "
-            f"_SHARES_OUTSTANDING_TAGS/_SHARES_OUTSTANDING_DEI_TAGS.",
-            file=sys.stderr,
-        )
+        if shares_by_period:
+            # The tag WAS found (confirmed: CVNA) — so this isn't a
+            # missing-concept problem, it's every period's date failing
+            # to find a match. Print the actual date ranges so the
+            # mismatch is visible instead of another guess.
+            shares_dates = sorted(shares_by_period.keys())
+            report_range = f"{min(report_dates)} to {max(report_dates)}" if report_dates else "unknown"
+            print(
+                f"WARNING: market cap never computed for {ticker} — shares-outstanding "
+                f"tag WAS found ({shares_source}), but no per-period date match ever "
+                f"succeeded. Shares data spans {shares_dates[0]} to {shares_dates[-1]}; "
+                f"report dates span {report_range}. Likely a date-alignment issue "
+                f"(possibly a multi-share-class company) rather than a missing tag.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"WARNING: market cap never computed for {ticker} — no shares-outstanding "
+                f"XBRL value found for ANY period (shares source checked: {shares_source}). "
+                f"This company's filings may tag shares outstanding under a concept not in "
+                f"_SHARES_OUTSTANDING_TAGS/_SHARES_OUTSTANDING_DEI_TAGS.",
+                file=sys.stderr,
+            )
     elif reasons["no_price_data"] == total_periods:
         print(
             f"WARNING: market cap never computed for {ticker} — shares outstanding WAS "

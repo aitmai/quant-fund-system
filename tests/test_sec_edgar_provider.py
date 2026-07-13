@@ -222,7 +222,43 @@ class TestSECEdgarProvider(unittest.TestCase):
 
 
     @patch.object(SECEdgarProvider, "_fetch_company_facts")
-    def test_debt_equity_falls_back_to_current_plus_noncurrent_liabilities(self, mock_fetch):
+    def test_shares_after_report_date_still_enables_market_cap(self, mock_fetch):
+        mock_fetch.return_value = _fake_company_facts(
+            net_income=[("2025-10-01", "2025-12-31", 1000000)],
+            equity=[("2025-12-31", 10000000)],
+            liabilities=[("2025-12-31", 2000000)],
+            op_income=[("2025-10-01", "2025-12-31", 1200000)],
+            shares=[("2026-01-20", 1000)],  # ~20 days AFTER the report date
+        )
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.fetchall.return_value = [(date(2025, 12, 20), 100.0)]
+        conn.cursor.return_value.__enter__.return_value = cursor
+
+        rows = self.provider.fetch_fundamentals("TEST", "0000320193", conn=conn)
+        # market_cap = 1000 * 100 = 100,000; ebitda = 1,200,000
+        # ev_ebitda would be None only if market cap failed — assert it didn't
+        self.assertIsNotNone(rows[0].ev_ebitda)
+
+    @patch.object(SECEdgarProvider, "_fetch_company_facts")
+    def test_shares_lookup_respects_tolerance_window(self, mock_fetch):
+        # A shares date WAY outside the tolerance window (e.g. from a
+        # completely different fiscal year) should NOT be used as a stand-in.
+        mock_fetch.return_value = _fake_company_facts(
+            net_income=[("2025-10-01", "2025-12-31", 1000000)],
+            equity=[("2025-12-31", 10000000)],
+            op_income=[("2025-10-01", "2025-12-31", 1200000)],
+            shares=[("2023-01-01", 1000)],  # ~3 years away — too far
+        )
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.fetchall.return_value = [(date(2025, 12, 20), 100.0)]
+        conn.cursor.return_value.__enter__.return_value = cursor
+
+        rows = self.provider.fetch_fundamentals("TEST", "0000320193", conn=conn)
+        self.assertIsNone(rows[0].ev_ebitda)
+
+
         # Combined `Liabilities` tag absent entirely (confirmed: WMT) —
         # should sum LiabilitiesCurrent + LiabilitiesNoncurrent instead.
         facts = _fake_company_facts(
@@ -259,6 +295,123 @@ class TestSECEdgarProvider(unittest.TestCase):
         self.provider.fetch_fundamentals("TEST", "0000320193", conn=conn)
 
         self.assertEqual(cursor.fetchall.call_count, 1)
+
+    @patch("src.providers.sec_edgar_provider.print")
+    @patch.object(SECEdgarProvider, "_fetch_company_facts")
+    def test_ev_ebitda_falls_back_to_net_income_when_operating_income_missing(self, mock_fetch, mock_print):
+        # market cap succeeds (shares + price both present), and
+        # OperatingIncomeLoss is missing entirely (confirmed real case:
+        # WDAY, ICE, PODD) — but NetIncomeLoss IS present, so the
+        # NetIncome+Interest+Tax+D&A fallback should now compute ev_ebitda
+        # successfully instead of giving up.
+        mock_fetch.return_value = _fake_company_facts(
+            net_income=[("2025-10-01", "2025-12-31", 1000000)],
+            equity=[("2025-12-31", 10000000)],
+            liabilities=[("2025-12-31", 2000000)],
+            shares=[("2025-12-31", 1000)],
+            # no op_income=... passed
+        )
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.fetchall.return_value = [(date(2025, 12, 20), 100.0)]
+        conn.cursor.return_value.__enter__.return_value = cursor
+
+        rows = self.provider.fetch_fundamentals("WDAY", "0000320193", conn=conn)
+
+        # market_cap = 1000 * 100 = 100,000; EBITDA fallback = net_income
+        # (no interest/tax/depreciation supplied) = 1,000,000
+        # EV = 100,000 + 2,000,000 - 0 = 2,100,000
+        expected = 2_100_000 / 1_000_000
+        self.assertAlmostEqual(rows[0].ev_ebitda, expected)
+
+        printed = " ".join(str(c) for c in mock_print.call_args_list)
+        self.assertNotIn("ev_ebitda never computed", printed)
+        self.assertNotIn("market cap never computed", printed)
+
+    @patch("src.providers.sec_edgar_provider.print")
+    @patch.object(SECEdgarProvider, "_fetch_company_facts")
+    def test_diagnoses_missing_operating_income_when_fallback_also_fails(self, mock_fetch, mock_print):
+        # Neither OperatingIncomeLoss NOR NetIncomeLoss/ProfitLoss present
+        # -> the fallback has nothing to build on either, so this should
+        # still surface as a clear diagnosis, not a silent None.
+        mock_fetch.return_value = _fake_company_facts(
+            equity=[("2025-12-31", 10000000)],
+            liabilities=[("2025-12-31", 2000000)],
+            shares=[("2025-12-31", 1000)],
+            eps=[("2025-10-01", "2025-12-31", 1.0)],  # gives fetch_fundamentals a report-date anchor
+            # no net_income, no op_income
+        )
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.fetchall.return_value = [(date(2025, 12, 20), 100.0)]
+        conn.cursor.return_value.__enter__.return_value = cursor
+
+        self.provider.fetch_fundamentals("TEST", "0000320193", conn=conn)
+
+        printed = " ".join(str(c) for c in mock_print.call_args_list)
+        self.assertIn("neither OperatingIncomeLoss NOR", printed)
+        self.assertNotIn("market cap never computed", printed)
+
+    @patch("src.providers.sec_edgar_provider.print")
+    @patch.object(SECEdgarProvider, "_fetch_company_facts")
+    def test_diagnoses_missing_liabilities_when_market_cap_and_op_income_are_fine(self, mock_fetch, mock_print):
+        mock_fetch.return_value = _fake_company_facts(
+            net_income=[("2025-10-01", "2025-12-31", 1000000)],
+            equity=[("2025-12-31", 10000000)],
+            op_income=[("2025-10-01", "2025-12-31", 1200000)],
+            shares=[("2025-12-31", 1000)],
+            # no liabilities=... passed
+        )
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.fetchall.return_value = [(date(2025, 12, 20), 100.0)]
+        conn.cursor.return_value.__enter__.return_value = cursor
+
+        self.provider.fetch_fundamentals("TEST", "0000320193", conn=conn)
+
+        printed = " ".join(str(c) for c in mock_print.call_args_list)
+        self.assertIn("no Liabilities value", printed)
+
+    @patch("src.providers.sec_edgar_provider.print")
+    @patch.object(SECEdgarProvider, "_fetch_company_facts")
+    def test_diagnoses_missing_operating_cash_flow_when_market_cap_is_fine(self, mock_fetch, mock_print):
+        mock_fetch.return_value = _fake_company_facts(
+            net_income=[("2025-10-01", "2025-12-31", 1000000)],
+            equity=[("2025-12-31", 10000000)],
+            shares=[("2025-12-31", 1000)],
+            # no op_cash_flow=... passed
+        )
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.fetchall.return_value = [(date(2025, 12, 20), 100.0)]
+        conn.cursor.return_value.__enter__.return_value = cursor
+
+        self.provider.fetch_fundamentals("TEST", "0000320193", conn=conn)
+
+        printed = " ".join(str(c) for c in mock_print.call_args_list)
+        self.assertIn("no NetCashProvidedByUsedInOperatingActivities", printed)
+
+    @patch.object(SECEdgarProvider, "_fetch_company_facts")
+    def test_weighted_average_shares_used_as_last_resort(self, mock_fetch):
+        facts = _fake_company_facts(
+            net_income=[("2025-10-01", "2025-12-31", 1000000)],
+            equity=[("2025-12-31", 10000000)],
+            op_income=[("2025-10-01", "2025-12-31", 1200000)],
+            liabilities=[("2025-12-31", 2000000)],
+            # no shares=... passed under any of the normal tags
+        )
+        facts["facts"]["us-gaap"]["WeightedAverageNumberOfDilutedSharesOutstanding"] = {
+            "units": {"shares": [{"start": "2025-10-01", "end": "2025-12-31", "val": 500}]}
+        }
+        mock_fetch.return_value = facts
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.fetchall.return_value = [(date(2025, 12, 20), 100.0)]
+        conn.cursor.return_value.__enter__.return_value = cursor
+
+        rows = self.provider.fetch_fundamentals("TEST", "0000320193", conn=conn)
+        # market_cap = 500 shares * $100 = 50,000 -> ev_ebitda should now compute
+        self.assertIsNotNone(rows[0].ev_ebitda)
 
     @patch("src.providers.sec_edgar_provider.print")
     @patch.object(SECEdgarProvider, "_fetch_company_facts")
