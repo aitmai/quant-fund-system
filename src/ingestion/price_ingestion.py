@@ -32,6 +32,14 @@ MAX_RETRY_COUNT = 3
 # tickers. Default is deliberately small: even at 0.5s/ticker, 400
 # tickers/day only adds ~3-4 minutes to a daily cron run.
 REQUEST_DELAY_SECONDS = float(os.environ.get("PRICE_REQUEST_DELAY_SECONDS", "0.5"))
+# If this many tickers in a row ALL fail (both providers exhausted — see
+# provider_factory.py's own circuit breaker for Tiingo specifically), that's
+# no longer "a few bad tickers," it's Yahoo broadly throttling this session
+# for everything. Once that happens, every remaining ticker this run is
+# essentially guaranteed to fail too — continuing just burns CI minutes (or
+# your patience) for nothing. Stop early; retry_count/fetch_status already
+# ensures these get picked up again on the next scheduled run.
+MAX_CONSECUTIVE_FAILURES = int(os.environ.get("PRICE_MAX_CONSECUTIVE_FAILURES", "15"))
 
 
 def seed_new_tickers(conn):
@@ -128,12 +136,20 @@ def run(conn, job=None) -> dict:
         print(msg, file=sys.stderr)
         if job:
             job.note(msg)
-        return {"processed": 0, "succeeded": 0, "failed": 0, "skipped_reason": reason}
+        return {
+            "processed": 0,
+            "succeeded": 0,
+            "failed": 0,
+            "skipped_reason": reason,
+            "stopped_early_reason": "",
+        }
 
     candidates = get_candidates(conn, tickers_remaining)
     today = date.today()
     succeeded = 0
     failed = 0
+    consecutive_failures = 0
+    stopped_early_reason = ""
 
     for ticker, last_fetched_date, retry_count in candidates:
         start_date = (
@@ -144,6 +160,7 @@ def run(conn, job=None) -> dict:
         if start_date > today:
             # Already caught up (e.g. ran twice same day) — nothing to do, mark complete.
             mark_success(conn, ticker, today, "n/a")
+            consecutive_failures = 0
             continue
 
         try:
@@ -152,16 +169,35 @@ def run(conn, job=None) -> dict:
             mark_success(conn, ticker, today, provider_used)
             budget.record_usage(conn, "price", calls=1)
             succeeded += 1
+            consecutive_failures = 0
         except PriceProviderError as exc:
             print(f"ERROR: price fetch failed for {ticker}: {exc}", file=sys.stderr)
             mark_failure(conn, ticker, retry_count)
             budget.record_usage(conn, "price", calls=1)  # the attempt still cost a call
             failed += 1
+            consecutive_failures += 1
+
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                stopped_early_reason = (
+                    f"{consecutive_failures} consecutive failures — likely broad provider "
+                    f"throttling, not bad tickers. Stopping early; remaining tickers will "
+                    f"retry on the next scheduled run."
+                )
+                print(f"WARNING: {stopped_early_reason}", file=sys.stderr)
+                break
 
         if REQUEST_DELAY_SECONDS > 0:
             time.sleep(REQUEST_DELAY_SECONDS)
 
-    summary = {"processed": succeeded + failed, "succeeded": succeeded, "failed": failed, "skipped_reason": ""}
+    summary = {
+        "processed": succeeded + failed,
+        "succeeded": succeeded,
+        "failed": failed,
+        "skipped_reason": "",
+        "stopped_early_reason": stopped_early_reason,
+    }
     if job:
         job.note(f"processed={summary['processed']} succeeded={succeeded} failed={failed}")
+        if stopped_early_reason:
+            job.note(f"stopped_early: {stopped_early_reason}")
     return summary
