@@ -160,5 +160,46 @@ class TestPriceIngestionPacing(unittest.TestCase):
         self.assertIn("providers are unavailable", summary["stopped_early_reason"])
 
 
+class TestGetCandidatesQuery(unittest.TestCase):
+    """CONFIRMED (2026-07-14): a ticker whose retry_count reaches
+    MAX_RETRY_COUNT (fetch_status -> 'failed') was previously excluded
+    from EVERY future run's candidate query, forever — neither existing
+    WHERE clause (retry_count < 3, or fetch_status = 'complete') is ever
+    true again for it. These tests verify the actual SQL sent to the
+    database includes the new cooldown clause that fixes this, since
+    every other get_candidates test in this file mocks the function away
+    entirely and never exercises the real query.
+    """
+
+    def _fake_conn(self, rows=None):
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.fetchall.return_value = rows or []
+        conn.cursor.return_value.__enter__.return_value = cursor
+        return conn, cursor
+
+    def test_query_includes_failed_retry_cooldown_clause(self):
+        conn, cursor = self._fake_conn()
+        price_ingestion.get_candidates(conn, 100)
+
+        executed_sql = cursor.execute.call_args[0][0]
+        executed_params = cursor.execute.call_args[0][1]
+
+        self.assertIn("fetch_status = 'failed'", executed_sql)
+        self.assertIn("last_attempt_at < NOW() - INTERVAL", executed_sql)
+        # MAX_RETRY_COUNT, FAILED_RETRY_COOLDOWN_DAYS, limit — in that order.
+        self.assertIn(price_ingestion.FAILED_RETRY_COOLDOWN_DAYS, executed_params)
+
+    def test_cooldown_days_configurable_via_env(self):
+        with patch.dict("os.environ", {"PRICE_FAILED_RETRY_COOLDOWN_DAYS": "30"}):
+            import importlib
+            from src.ingestion import price_ingestion as reloaded
+            importlib.reload(reloaded)
+            try:
+                self.assertEqual(reloaded.FAILED_RETRY_COOLDOWN_DAYS, 30)
+            finally:
+                importlib.reload(reloaded)  # restore default for subsequent tests
+
+
 if __name__ == "__main__":
     unittest.main()

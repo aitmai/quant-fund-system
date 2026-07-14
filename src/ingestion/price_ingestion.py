@@ -59,6 +59,20 @@ def seed_new_tickers(conn):
             )
 
 
+# CONFIRMED (2026-07-14): the ORIGINAL query below permanently excludes a
+# ticker the moment retry_count reaches MAX_RETRY_COUNT — fetch_status
+# flips to 'failed', and at that point NEITHER clause is ever true again
+# (retry_count < 3 fails; fetch_status = 'complete' fails). That ticker
+# would then be skipped by every future cron run FOREVER, with no
+# built-in recovery — the only way out was manually resetting it via SQL.
+# FAILED_RETRY_COOLDOWN_DAYS adds a third path: a 'failed' ticker becomes
+# eligible again after this many days, regardless of retry_count. This
+# doesn't retry it every run (that would just re-burn the same 3 attempts
+# instantly) — it gives genuinely-broken tickers periodic re-checks
+# instead of a life sentence, while still not hammering them constantly.
+FAILED_RETRY_COOLDOWN_DAYS = int(os.environ.get("PRICE_FAILED_RETRY_COOLDOWN_DAYS", "14"))
+
+
 def get_candidates(conn, limit: int):
     with conn:
         with conn.cursor() as cur:
@@ -71,11 +85,12 @@ def get_candidates(conn, limit: int):
                   AND (
                         (s.fetch_status IN ('pending', 'failed') AND s.retry_count < %s)
                      OR (s.fetch_status = 'complete' AND s.last_fetched_date < CURRENT_DATE - INTERVAL '1 day')
+                     OR (s.fetch_status = 'failed' AND s.last_attempt_at < NOW() - INTERVAL '%s days')
                   )
                 ORDER BY s.priority_rank ASC, s.last_attempt_at ASC NULLS FIRST
                 LIMIT %s
                 """,
-                (MAX_RETRY_COUNT, limit),
+                (MAX_RETRY_COUNT, FAILED_RETRY_COOLDOWN_DAYS, limit),
             )
             return cur.fetchall()
 

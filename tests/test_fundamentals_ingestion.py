@@ -104,5 +104,30 @@ class TestFundamentalsIngestionEarlyStop(unittest.TestCase):
         self.assertEqual(summary["stopped_early_reason"], "")
 
 
+class TestGetCandidatesQuery(unittest.TestCase):
+    """Same fix, same rationale as price_ingestion.py's equivalent test:
+    a ticker whose retry_count reaches MAX_RETRY_COUNT was previously
+    excluded from every future candidate query, forever. Verifies the
+    real SQL (not a mock of get_candidates) includes the cooldown clause."""
+
+    def _fake_conn(self, rows=None):
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.fetchall.return_value = rows or []
+        conn.cursor.return_value.__enter__.return_value = cursor
+        return conn, cursor
+
+    def test_query_includes_failed_retry_cooldown_clause(self):
+        conn, cursor = self._fake_conn()
+        fundamentals_ingestion.get_candidates(conn, 100)
+
+        executed_sql = cursor.execute.call_args[0][0]
+        executed_params = cursor.execute.call_args[0][1]
+
+        self.assertIn("fetch_status = 'failed'", executed_sql)
+        self.assertIn("last_attempt_at < NOW() - INTERVAL", executed_sql)
+        self.assertIn(fundamentals_ingestion.FAILED_RETRY_COOLDOWN_DAYS, executed_params)
+
+
 if __name__ == "__main__":
     unittest.main()

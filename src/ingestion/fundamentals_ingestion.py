@@ -58,6 +58,14 @@ def seed_new_tickers(conn):
             )
 
 
+# CONFIRMED (2026-07-14): same permanent-exclusion bug as price_ingestion.py —
+# once retry_count reaches MAX_RETRY_COUNT, fetch_status flips to 'failed'
+# and neither existing clause is ever true again for that ticker. This
+# adds a periodic re-check instead of a life sentence — see
+# price_ingestion.py's FAILED_RETRY_COOLDOWN_DAYS for the full rationale.
+FAILED_RETRY_COOLDOWN_DAYS = int(os.environ.get("FUNDAMENTALS_FAILED_RETRY_COOLDOWN_DAYS", "14"))
+
+
 def get_candidates(conn, limit: int):
     with conn:
         with conn.cursor() as cur:
@@ -70,11 +78,12 @@ def get_candidates(conn, limit: int):
                   AND (
                         (s.fetch_status IN ('pending', 'failed') AND s.retry_count < %s)
                      OR (s.fetch_status = 'complete' AND s.last_fetched_date < CURRENT_DATE - INTERVAL '%s days')
+                     OR (s.fetch_status = 'failed' AND s.last_attempt_at < NOW() - INTERVAL '%s days')
                   )
                 ORDER BY s.priority_rank ASC, s.last_attempt_at ASC NULLS FIRST
                 LIMIT %s
                 """,
-                (MAX_RETRY_COUNT, STALENESS_DAYS, limit),
+                (MAX_RETRY_COUNT, STALENESS_DAYS, FAILED_RETRY_COOLDOWN_DAYS, limit),
             )
             return cur.fetchall()
 
