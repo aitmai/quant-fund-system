@@ -18,7 +18,7 @@ import time
 from datetime import date, timedelta
 
 from . import budget
-from ..providers.price_provider_base import PriceProviderError
+from ..providers.price_provider_base import AllProvidersUnavailableError, PriceProviderError
 from ..providers.provider_factory import fetch_with_fallback
 
 DEFAULT_BACKFILL_YEARS = int(os.environ.get("PRICE_BACKFILL_YEARS", "3"))
@@ -170,6 +170,22 @@ def run(conn, job=None) -> dict:
             budget.record_usage(conn, "price", calls=1)
             succeeded += 1
             consecutive_failures = 0
+        except AllProvidersUnavailableError as exc:
+            # Every provider was already circuit-broken BEFORE we even
+            # tried this ticker — no HTTP call was actually made, so this
+            # isn't this ticker's failure and shouldn't cost it a
+            # retry_count or a budget call. Every remaining candidate this
+            # run would fail identically, so stop now instead of grinding
+            # through the rest one guaranteed-wasted iteration at a time.
+            print(f"INFO: {ticker} skipped — {exc}", file=sys.stderr)
+            stopped_early_reason = (
+                f"All configured price providers are unavailable this run "
+                f"({exc}). Stopping immediately — remaining tickers were left "
+                f"untouched (no retry_count penalty) and will retry on the "
+                f"next scheduled run."
+            )
+            print(f"WARNING: {stopped_early_reason}", file=sys.stderr)
+            break
         except PriceProviderError as exc:
             print(f"ERROR: price fetch failed for {ticker}: {exc}", file=sys.stderr)
             mark_failure(conn, ticker, retry_count)

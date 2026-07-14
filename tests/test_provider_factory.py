@@ -3,7 +3,7 @@ from datetime import date
 from unittest.mock import MagicMock, patch
 
 from src.providers import provider_factory
-from src.providers.price_provider_base import PriceBar, PriceProviderError
+from src.providers.price_provider_base import AllProvidersUnavailableError, PriceBar, PriceProviderError
 
 
 def _fake_conn(active_provider="yfinance"):
@@ -153,6 +153,101 @@ class TestProviderFallback(unittest.TestCase):
         provider_factory._rate_limited_providers.add("tiingo")
         provider_factory.reset_circuit_breaker()
         self.assertEqual(provider_factory._rate_limited_providers, set())
+
+    def test_repeated_ambiguous_failures_trip_circuit_breaker(self):
+        # Confirmed live 2026-07-14: yfinance's "Yahoo silently blocked us"
+        # failure never says "rate limit" — it looks identical, per call,
+        # to a genuinely bad/delisted ticker. PROVIDER_FAILURE_CIRCUIT_THRESHOLD
+        # consecutive failures across DIFFERENT tickers should trip the
+        # breaker anyway, since real delistings don't cluster like that.
+        conn = _fake_conn(active_provider="tiingo")
+        mock_yf_instance = MagicMock()
+        mock_yf_instance.fetch_history.side_effect = PriceProviderError(
+            "yfinance returned no rows for X (delisted, bad symbol, or throttled)",
+            retryable=True,
+        )
+        mock_tiingo_instance = MagicMock()
+        mock_tiingo_instance.fetch_history.side_effect = PriceProviderError(
+            "Tiingo has no data (404)", retryable=False
+        )
+
+        with patch.dict(
+            provider_factory.PROVIDER_CLASSES,
+            {
+                "tiingo": MagicMock(return_value=mock_tiingo_instance),
+                "yfinance": MagicMock(return_value=mock_yf_instance),
+            },
+        ):
+            self.assertNotIn("yfinance", provider_factory._rate_limited_providers)
+
+            for i in range(provider_factory.PROVIDER_FAILURE_CIRCUIT_THRESHOLD):
+                with self.assertRaises(PriceProviderError):
+                    provider_factory.fetch_with_fallback(conn, f"TICK{i}", date(2026, 1, 1))
+
+            # After exactly the threshold's worth of consecutive failures,
+            # yfinance should now be circuit-broken even though it never
+            # said "rate limit".
+            self.assertIn("yfinance", provider_factory._rate_limited_providers)
+
+    def test_all_providers_unavailable_raises_distinct_error_without_new_http_calls(self):
+        conn = _fake_conn(active_provider="tiingo")
+        provider_factory._rate_limited_providers.add("tiingo")
+        provider_factory._rate_limited_providers.add("yfinance")
+
+        mock_tiingo_cls = MagicMock()
+        mock_yf_cls = MagicMock()
+
+        with patch.dict(
+            provider_factory.PROVIDER_CLASSES,
+            {"tiingo": mock_tiingo_cls, "yfinance": mock_yf_cls},
+        ):
+            with self.assertRaises(AllProvidersUnavailableError):
+                provider_factory.fetch_with_fallback(conn, "ANYTICK", date(2026, 1, 1))
+
+        # Both providers were already circuit-broken, so neither should
+        # even have been instantiated for this call — no wasted HTTP call.
+        mock_tiingo_cls.assert_not_called()
+        mock_yf_cls.assert_not_called()
+
+    def test_success_resets_consecutive_failure_counter(self):
+        conn = _fake_conn(active_provider="tiingo")
+        mock_tiingo_instance = MagicMock()
+        # Two failures, then a success, then two more failures — should
+        # need a FULL new streak of PROVIDER_FAILURE_CIRCUIT_THRESHOLD
+        # after the success before tripping, not just a running total.
+        mock_tiingo_instance.fetch_history.side_effect = [
+            PriceProviderError("no data", retryable=False),
+            PriceProviderError("no data", retryable=False),
+            [PriceBar("GOOD", date(2026, 1, 2), 1, 1, 1, 1, 1, 100)],
+            PriceProviderError("no data", retryable=False),
+            PriceProviderError("no data", retryable=False),
+        ]
+        mock_yf_instance = MagicMock()
+        mock_yf_instance.fetch_history.side_effect = PriceProviderError(
+            "yfinance returned no rows (delisted, bad symbol, or throttled)", retryable=True
+        )
+
+        with patch.dict(
+            provider_factory.PROVIDER_CLASSES,
+            {
+                "tiingo": MagicMock(return_value=mock_tiingo_instance),
+                "yfinance": MagicMock(return_value=mock_yf_instance),
+            },
+        ):
+            with self.assertRaises(PriceProviderError):
+                provider_factory.fetch_with_fallback(conn, "A", date(2026, 1, 1))
+            with self.assertRaises(PriceProviderError):
+                provider_factory.fetch_with_fallback(conn, "B", date(2026, 1, 1))
+            # Success in between — counter should reset to 0.
+            provider_factory.fetch_with_fallback(conn, "GOOD", date(2026, 1, 1))
+            self.assertNotIn("tiingo", provider_factory._rate_limited_providers)
+
+            with self.assertRaises(PriceProviderError):
+                provider_factory.fetch_with_fallback(conn, "C", date(2026, 1, 1))
+            with self.assertRaises(PriceProviderError):
+                provider_factory.fetch_with_fallback(conn, "D", date(2026, 1, 1))
+            # Only 2 failures since the reset (threshold is 3) — still not tripped.
+            self.assertNotIn("tiingo", provider_factory._rate_limited_providers)
 
 
 if __name__ == "__main__":

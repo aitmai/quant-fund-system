@@ -3,7 +3,7 @@ from datetime import date
 from unittest.mock import MagicMock, patch
 
 from src.ingestion import price_ingestion
-from src.providers.price_provider_base import PriceBar
+from src.providers.price_provider_base import AllProvidersUnavailableError, PriceBar
 
 
 class TestPriceIngestionPacing(unittest.TestCase):
@@ -129,6 +129,35 @@ class TestPriceIngestionPacing(unittest.TestCase):
         # Should have processed the first streak + the success + a full
         # second streak before stopping — not stopped by the first streak alone.
         self.assertGreater(summary["processed"], price_ingestion.MAX_CONSECUTIVE_FAILURES)
+
+
+    @patch("src.ingestion.price_ingestion.time.sleep")
+    @patch("src.ingestion.price_ingestion.budget")
+    @patch("src.ingestion.price_ingestion.fetch_with_fallback")
+    @patch("src.ingestion.price_ingestion.mark_failure")
+    @patch("src.ingestion.price_ingestion.get_candidates")
+    @patch("src.ingestion.price_ingestion.seed_new_tickers")
+    def test_all_providers_unavailable_stops_immediately_without_retry_penalty(
+        self, mock_seed, mock_get_candidates, mock_mark_failure,
+        mock_fetch, mock_budget, mock_sleep,
+    ):
+        # Confirmed live 2026-07-14: once every provider is circuit-broken,
+        # every remaining candidate would fail identically — this should
+        # stop on the FIRST such failure (not wait for MAX_CONSECUTIVE_FAILURES),
+        # and the ticker that hit this shouldn't be charged a retry_count
+        # or a budget call, since no actual HTTP request was made for it.
+        mock_budget.remaining_ticker_budget.return_value = (50, "")
+        mock_get_candidates.return_value = [(f"TICK{i}", None, 0) for i in range(50)]
+        mock_fetch.side_effect = AllProvidersUnavailableError(
+            "No provider available — all circuit-broken for the rest of this run."
+        )
+
+        summary = price_ingestion.run(MagicMock())
+
+        mock_mark_failure.assert_not_called()
+        mock_budget.record_usage.assert_not_called()
+        self.assertEqual(summary["processed"], 0)
+        self.assertIn("providers are unavailable", summary["stopped_early_reason"])
 
 
 if __name__ == "__main__":

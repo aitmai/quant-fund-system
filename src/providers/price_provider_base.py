@@ -41,6 +41,30 @@ class PriceProviderError(Exception):
         self.retryable = retryable
 
 
+class AllProvidersUnavailableError(PriceProviderError):
+    """Raised instead of a plain PriceProviderError when EVERY configured
+    provider is circuit-broken for the rest of this run — i.e. the
+    failure reflects the run's environment (both providers currently
+    unusable: rate-limited, or repeatedly returning the "empty
+    response"/blocked signature), not anything wrong with THIS specific
+    ticker.
+
+    This distinction matters to the caller (price_ingestion.py):
+      - A normal PriceProviderError for one ticker is that ticker's own
+        problem (bad symbol, genuinely delisted, one-off timeout) and
+        should count against its retry_count as usual.
+      - AllProvidersUnavailableError means this ticker never really got
+        a fair attempt this run — every remaining ticker this run would
+        fail identically — so it shouldn't be penalized with a retry
+        count it didn't earn, and the run should stop immediately
+        rather than burning through MAX_CONSECUTIVE_FAILURES one wasted
+        HTTP call at a time.
+    """
+
+    def __init__(self, message: str):
+        super().__init__(message, retryable=True)
+
+
 class PriceProvider(ABC):
     name: str = "base"
 
