@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+{% block title %}Universe & Ingestion · Quant Fund System{% endblock %}
+{% block content %}
+
+<div class="page-header"><h1>Universe &amp; Ingestion</h1></div>
+
+<div class="section grid grid-2">
+  {% for p in progress %}
+    <div class="card">
+      <div class="label" style="font-size:11px;text-transform:uppercase;color:var(--text-dim);letter-spacing:0.06em;">{{ p.data_type }}</div>
+      <div style="display:flex;justify-content:space-between;align-items:baseline;margin-top:6px;">
+        <span class="mono" style="font-size:18px;">{{ p.complete_count }} / {{ p.total_count }}</span>
+        <span class="hint">{{ p.days_remaining }} day(s) left at current budget</span>
+      </div>
+      <div class="progress-track">
+        <div class="progress-fill" style="width: {{ (p.complete_count / p.total_count * 100) if p.total_count else 0 }}%;"></div>
+      </div>
+      <div class="hint">daily_budget: {{ p.daily_budget }}/day</div>
+    </div>
+  {% endfor %}
+</div>
+
+<div class="section card">
+  <h2>Add ticker manually</h2>
+  <form method="post" action="{{ url_for('gui.universe_add') }}" style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;">
+    <div class="field" style="margin-bottom:0;">
+      <label>Ticker</label>
+      <input type="text" name="ticker" placeholder="AAPL" required>
+    </div>
+    <div class="field" style="margin-bottom:0;">
+      <label>Company name</label>
+      <input type="text" name="company_name" placeholder="Apple Inc.">
+    </div>
+    <div class="field" style="margin-bottom:0;">
+      <label>Sector</label>
+      <input type="text" name="sector" placeholder="Technology">
+    </div>
+    <button class="btn btn-primary" type="submit">Add to universe</button>
+  </form>
+</div>
+
+<div class="section card">
+  <div class="page-header" style="margin-bottom:10px;">
+    <h2 style="margin:0;">Universe ({{ tickers|length }} shown)</h2>
+    <form method="get" style="display:flex;gap:8px;align-items:center;">
+      <select name="sector" onchange="this.form.submit()">
+        <option value="">All sectors</option>
+        {% for s in sectors %}
+          <option value="{{ s }}" {% if s == selected_sector %}selected{% endif %}>{{ s }}</option>
+        {% endfor %}
+      </select>
+    </form>
+  </div>
+  {% if tickers %}
+    <div class="table-wrap">
+      <table>
+        <tr><th>Ticker</th><th>Company</th><th>Sector</th><th>Market cap</th><th>Source</th><th>Actions</th></tr>
+        {% for t in tickers %}
+          <tr>
+            <td class="mono">{{ t.ticker }}</td>
+            <td>{{ t.company_name or "—" }}</td>
+            <td>{{ t.sector or "—" }}</td>
+            <td class="mono">{{ "$%.1fB"|format(t.market_cap / 1e9) if t.market_cap else "—" }}</td>
+            <td><span class="pill status-{{ 'complete' if t.source == 'auto' else 'queued' }}">{{ t.source }}</span></td>
+            <td>
+              <form method="post" action="{{ url_for('gui.universe_prioritize') }}" style="display:inline;">
+                <input type="hidden" name="ticker" value="{{ t.ticker }}">
+                <input type="hidden" name="data_type" value="price">
+                <button class="btn btn-sm" type="submit" title="Move to front of next price ingestion run">Prioritize</button>
+              </form>
+              <form method="post" action="{{ url_for('gui.universe_force_refresh') }}" style="display:inline;">
+                <input type="hidden" name="ticker" value="{{ t.ticker }}">
+                <input type="hidden" name="data_type" value="price">
+                <button class="btn btn-sm" type="submit" title="Reset to pending, re-fetch next cron run">Force refresh</button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+      </table>
+    </div>
+  {% else %}
+    <div class="empty-state">
+      <div class="empty-title">No tickers match this filter</div>
+    </div>
+  {% endif %}
+</div>
+
+<div class="section card">
+  <h2>Recent universe changes</h2>
+  {% if changes %}
+    <div class="table-wrap">
+      <table>
+        <tr><th>Date</th><th>Ticker</th><th>Change</th><th>Source</th><th>Detected by</th></tr>
+        {% for c in changes %}
+          <tr>
+            <td class="mono">{{ c.change_date }}</td>
+            <td class="mono">{{ c.ticker }}</td>
+            <td><span class="pill status-{{ 'complete' if c.change_type == 'added' else 'failed' }}">{{ c.change_type }}</span></td>
+            <td>{{ c.source_index or "—" }}</td>
+            <td>{{ c.detected_by }}</td>
+          </tr>
+        {% endfor %}
+      </table>
+    </div>
+  {% else %}
+    <div class="empty-state"><div class="empty-title">No changes logged yet</div></div>
+  {% endif %}
+</div>
+
+{% endblock %}

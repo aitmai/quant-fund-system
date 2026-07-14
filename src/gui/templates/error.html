@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}Connection error{% endblock %}
+{% block content %}
+<div class="card empty-state">
+  <div class="empty-title">Can't reach the database</div>
+  <div class="empty-detail mono">{{ message }}</div>
+  <div class="hint" style="margin-top:14px;">Check DATABASE_URL is set (locally in .env, on Render under Environment) and that Supabase is reachable.</div>
+</div>
+{% endblock %}

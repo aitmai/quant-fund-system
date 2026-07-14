@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% block title %}Dashboard · Quant Fund System{% endblock %}
+{% block content %}
+
+<div class="page-header">
+  <h1>Dashboard</h1>
+  <div>
+    <a href="{{ url_for('gui.backtest') }}" class="btn btn-sm">Run backtest</a>
+    <a href="{{ url_for('gui.exit_signals') }}" class="btn btn-sm">Exit signals</a>
+    <a href="{{ url_for('gui.universe') }}" class="btn btn-sm">Upload tickers</a>
+  </div>
+</div>
+
+<div class="section grid grid-4">
+  <div class="card metric-card">
+    <div class="label">Total NAV</div>
+    <div class="value">{{ "$%.0f"|format(snapshot.total_nav) if snapshot and snapshot.total_nav else "—" }}</div>
+  </div>
+  <div class="card metric-card">
+    <div class="label">Total cash invested</div>
+    <div class="value">{{ "$%.0f"|format(fund.total_cash_invested) if fund and fund.total_cash_invested else "—" }}</div>
+  </div>
+  <div class="card metric-card">
+    <div class="label">Investment start date</div>
+    <div class="value">{{ fund.fund_start_date if fund and fund.fund_start_date else "Not started" }}</div>
+  </div>
+  <div class="card metric-card">
+    <div class="label">Total return</div>
+    <div class="value {% if snapshot and snapshot.cumulative_return_pct %}{{ 'positive' if snapshot.cumulative_return_pct >= 0 else 'negative' }}{% endif %}">
+      {{ "%.2f%%"|format(snapshot.cumulative_return_pct) if snapshot and snapshot.cumulative_return_pct is not none else "—" }}
+    </div>
+  </div>
+  <div class="card metric-card">
+    <div class="label">Long sleeve</div>
+    <div class="value">{{ "$%.0f"|format(snapshot.long_sleeve_value) if snapshot and snapshot.long_sleeve_value else "—" }}</div>
+  </div>
+  <div class="card metric-card">
+    <div class="label">Hedge sleeve</div>
+    <div class="value">{{ "$%.0f"|format(snapshot.hedge_sleeve_value) if snapshot and snapshot.hedge_sleeve_value else "—" }}</div>
+  </div>
+  <div class="card metric-card">
+    <div class="label">Cash</div>
+    <div class="value">{{ "$%.0f"|format(snapshot.cash_balance) if snapshot and snapshot.cash_balance else "—" }}</div>
+  </div>
+  <div class="card metric-card">
+    <div class="label">Daily P&L</div>
+    <div class="value {% if snapshot and snapshot.daily_pnl %}{{ 'positive' if snapshot.daily_pnl >= 0 else 'negative' }}{% endif %}">
+      {{ "$%.0f"|format(snapshot.daily_pnl) if snapshot and snapshot.daily_pnl is not none else "—" }}
+    </div>
+  </div>
+</div>
+
+<div class="section card">
+  <h2>Pipeline status</h2>
+  <div class="pipeline-chain">
+    {% for stage in stages %}
+      <div class="pipeline-node status-{{ stage.status }}">
+        <div class="node-dot"></div>
+        <div class="node-label">{{ stage.label }}</div>
+        <span class="pill status-{{ stage.status }}"><span class="pill-dot"></span>{{ stage.status }}</span>
+      </div>
+      {% if not loop.last %}
+        <div class="pipeline-track {% if stage.status == 'complete' %}filled{% endif %}"></div>
+      {% endif %}
+    {% endfor %}
+  </div>
+  <div class="hint">Green = ran successfully · Amber = running/attention · Red = failed · Gray = phase not built yet. <a href="{{ url_for('gui.pipeline') }}">Full pipeline runner &rarr;</a></div>
+</div>
+
+<div class="section grid grid-2">
+  <div class="card">
+    <h2>Today's pick</h2>
+    {% if picks %}
+      <div class="table-wrap">
+        <table>
+          <tr><th>Ticker</th><th>Dollar allocated</th><th>Executed</th></tr>
+          {% for p in picks %}
+            <tr>
+              <td class="mono">{{ p.ticker }}</td>
+              <td class="mono">{{ "$%.0f"|format(p.dollar_allocated) if p.dollar_allocated else "—" }}</td>
+              <td><span class="pill status-{{ 'complete' if p.executed else 'queued' }}">{{ 'yes' if p.executed else 'pending' }}</span></td>
+            </tr>
+          {% endfor %}
+        </table>
+      </div>
+    {% else %}
+      <div class="empty-state">
+        <div class="empty-title">No picks yet</div>
+        <div class="empty-detail">Phase 5 (risk-parity sizing) hasn't run — daily_picks is empty until Stages 2-5 are built and producing real output.</div>
+      </div>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2>Portfolio risk snapshot</h2>
+    {% if risk %}
+      <div class="grid grid-2">
+        <div class="metric-card"><div class="label">Portfolio vol</div><div class="value mono">{{ "%.2f%%"|format(risk.portfolio_vol) if risk.portfolio_vol is not none else "—" }}</div></div>
+        <div class="metric-card"><div class="label">Portfolio beta</div><div class="value mono">{{ "%.2f"|format(risk.portfolio_beta) if risk.portfolio_beta is not none else "—" }}</div></div>
+      </div>
+      <div class="hint"><a href="{{ url_for('gui.portfolio_risk') }}">Full risk breakdown &rarr;</a></div>
+    {% else %}
+      <div class="empty-state">
+        <div class="empty-title">No risk data yet</div>
+        <div class="empty-detail">Stage 6 (portfolio risk aggregation) hasn't run. This fills in once positions exist and the risk-aggregation cron is built.</div>
+      </div>
+    {% endif %}
+  </div>
+</div>
+
+{% endblock %}

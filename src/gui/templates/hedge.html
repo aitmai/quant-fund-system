@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}Hedge Sleeve · Quant Fund System{% endblock %}
+{% block content %}
+
+<div class="page-header"><h1>Hedge Sleeve</h1></div>
+
+{% if latest %}
+  <div class="section grid grid-4">
+    <div class="card metric-card"><div class="label">Contracts held</div><div class="value mono">{{ latest.contracts_held or 0 }}</div></div>
+    <div class="card metric-card"><div class="label">Roll cost running</div><div class="value mono">{{ "$%.0f"|format(latest.roll_cost_running) if latest.roll_cost_running else "$0" }}</div></div>
+    <div class="card metric-card"><div class="label">Theta decay running</div><div class="value mono">{{ "$%.0f"|format(latest.theta_decay_running) if latest.theta_decay_running else "$0" }}</div></div>
+    <div class="card metric-card"><div class="label">Term structure</div><div class="value mono" style="font-size:15px;">{{ latest.term_structure_signal or "—" }}</div></div>
+  </div>
+
+  <div class="section card">
+    <h2>SPY put position</h2>
+    <div class="grid grid-4">
+      <div class="metric-card"><div class="label">Strike</div><div class="value mono">{{ latest.spy_put_strike or "—" }}</div></div>
+      <div class="metric-card"><div class="label">DTE</div><div class="value mono">{{ latest.spy_put_dte or "—" }}</div></div>
+      <div class="metric-card"><div class="label">Delta</div><div class="value mono">{{ latest.spy_put_delta or "—" }}</div></div>
+      <div class="metric-card"><div class="label">Premium</div><div class="value mono">{{ "$%.2f"|format(latest.spy_put_premium) if latest.spy_put_premium else "—" }}</div></div>
+    </div>
+  </div>
+
+  <div class="section card">
+    <h2>Vol signal history</h2>
+    <div class="table-wrap">
+      <table>
+        <tr><th>Date</th><th>Implied vol</th><th>Realized vol</th><th>GARCH forecast</th><th>Term structure</th></tr>
+        {% for h in history %}
+          <tr>
+            <td class="mono">{{ h.date }}</td>
+            <td class="mono">{{ "%.2f"|format(h.implied_vol) if h.implied_vol is not none else "—" }}</td>
+            <td class="mono">{{ "%.2f"|format(h.realized_vol) if h.realized_vol is not none else "—" }}</td>
+            <td class="mono">{{ "%.2f"|format(h.garch_forecast) if h.garch_forecast is not none else "—" }}</td>
+            <td>{{ h.term_structure_signal or "—" }}</td>
+          </tr>
+        {% endfor %}
+      </table>
+    </div>
+  </div>
+{% else %}
+  <div class="card empty-state">
+    <div class="empty-title">No hedge sizing yet</div>
+    <div class="empty-detail">vol_hedge_state fills in once Phase 9 (hedge sleeve live sizing) runs its first daily VIX/SPY-put calculation. This can be built independently of Phases 2-7, in parallel.</div>
+  </div>
+{% endif %}
+
+{% endblock %}

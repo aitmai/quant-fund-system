@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block title %}Pipeline Runner · Quant Fund System{% endblock %}
+{% block content %}
+
+<div class="page-header"><h1>Pipeline Runner</h1></div>
+
+<div class="section card">
+  <h2>Stages</h2>
+  <div class="table-wrap">
+    <table>
+      <tr><th>Stage</th><th>Status</th><th>Last run</th><th>Triggered by</th><th></th></tr>
+      {% for s in stages %}
+        <tr>
+          <td>{{ s.label }}</td>
+          <td><span class="pill status-{{ s.status }}"><span class="pill-dot"></span>{{ s.status }}</span></td>
+          <td class="mono">{{ s.row.start_time.strftime('%Y-%m-%d %H:%M UTC') if s.row and s.row.start_time else "never" }}</td>
+          <td>{{ s.row.triggered_by if s.row else "—" }}</td>
+          <td>
+            {% if s.stage == "factor_scoring" %}
+              <form method="post" action="{{ url_for('gui.pipeline_run_factor_scoring') }}">
+                <button class="btn btn-sm btn-primary" type="submit">Run now</button>
+              </form>
+            {% else %}
+              <button class="btn btn-sm" disabled title="Enables once this phase's cron script exists">Run now<span class="badge-not-enabled">Phase pending</span></button>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+    </table>
+  </div>
+  <div class="hint">Factor scoring runs synchronously here since it's fast; ingestion and future stages stay cron/CLI-triggered to avoid racing shared budget state or hitting request timeouts.</div>
+</div>
+
+<div class="section card">
+  <h2>Latest factor scores</h2>
+  {% if latest_scores %}
+    <div class="table-wrap">
+      <table>
+        <tr><th>Ticker</th><th>Score date</th><th>Momentum z</th><th>Quality z</th><th>Value z</th><th>Low-vol z</th></tr>
+        {% for f in latest_scores %}
+          <tr>
+            <td class="mono">{{ f.ticker }}</td>
+            <td class="mono">{{ f.score_date }}</td>
+            <td class="mono">{{ "%.2f"|format(f.momentum_z) if f.momentum_z is not none else "—" }}</td>
+            <td class="mono">{{ "%.2f"|format(f.quality_z) if f.quality_z is not none else "—" }}</td>
+            <td class="mono">{{ "%.2f"|format(f.value_z) if f.value_z is not none else "—" }}</td>
+            <td class="mono">{{ "%.2f"|format(f.lowvol_z) if f.lowvol_z is not none else "—" }}</td>
+          </tr>
+        {% endfor %}
+      </table>
+    </div>
+  {% else %}
+    <div class="empty-state"><div class="empty-title">No factor scores yet</div><div class="empty-detail">Run factor scoring above once price/fundamentals coverage is healthy.</div></div>
+  {% endif %}
+</div>
+
+<div class="section card">
+  <h2>Run history</h2>
+  {% if runs %}
+    <div class="table-wrap">
+      <table>
+        <tr><th>Run ID</th><th>Stage</th><th>Type</th><th>Status</th><th>Start</th><th>Error</th></tr>
+        {% for r in runs %}
+          <tr>
+            <td class="mono">{{ r.run_id }}</td>
+            <td>{{ r.stage }}</td>
+            <td>{{ r.run_type }}</td>
+            <td><span class="pill status-{{ r.status }}"><span class="pill-dot"></span>{{ r.status }}</span></td>
+            <td class="mono">{{ r.start_time.strftime('%Y-%m-%d %H:%M') if r.start_time else "—" }}</td>
+            <td style="max-width:260px;white-space:normal;">{{ r.error_message or "—" }}</td>
+          </tr>
+        {% endfor %}
+      </table>
+    </div>
+  {% else %}
+    <div class="empty-state"><div class="empty-title">No runs logged yet</div></div>
+  {% endif %}
+</div>
+
+{% endblock %}

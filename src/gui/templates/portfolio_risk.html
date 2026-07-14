@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Portfolio Risk · Quant Fund System{% endblock %}
+{% block content %}
+
+<div class="page-header"><h1>Portfolio Risk</h1></div>
+<div class="hint" style="margin-top:-14px;margin-bottom:16px;"><a href="{{ url_for('gui.dashboard') }}">&larr; Back to Dashboard</a></div>
+
+{% if latest %}
+  <div class="section grid grid-2">
+    <div class="card metric-card"><div class="label">Portfolio vol</div><div class="value mono">{{ "%.2f%%"|format(latest.portfolio_vol) if latest.portfolio_vol is not none else "—" }}</div></div>
+    <div class="card metric-card"><div class="label">Portfolio beta</div><div class="value mono">{{ "%.2f"|format(latest.portfolio_beta) if latest.portfolio_beta is not none else "—" }}</div></div>
+  </div>
+
+  <div class="section card">
+    <h2>Sector concentration</h2>
+    {% if latest.sector_concentration %}
+      <div class="table-wrap">
+        <table>
+          <tr><th>Sector</th><th>Weight</th></tr>
+          {% for sector, weight in latest.sector_concentration.items() %}
+            <tr><td>{{ sector }}</td><td class="mono">{{ "%.1f%%"|format(weight) }}</td></tr>
+          {% endfor %}
+        </table>
+      </div>
+      <div class="hint">15% cap per sector, per DESIGN.md.</div>
+    {% else %}
+      <div class="empty-state"><div class="empty-title">No breakdown recorded</div></div>
+    {% endif %}
+  </div>
+
+  <div class="section card">
+    <h2>Factor exposure</h2>
+    {% if latest.factor_exposure %}
+      <div class="grid grid-4">
+        {% for factor, tilt in latest.factor_exposure.items() %}
+          <div class="metric-card"><div class="label">{{ factor }}</div><div class="value mono">{{ "%.2f"|format(tilt) }}</div></div>
+        {% endfor %}
+      </div>
+    {% else %}
+      <div class="empty-state"><div class="empty-title">No factor exposure recorded</div></div>
+    {% endif %}
+  </div>
+{% else %}
+  <div class="card empty-state">
+    <div class="empty-title">No portfolio risk snapshots yet</div>
+    <div class="empty-detail">portfolio_risk_snapshots fills in once Stage 6 (portfolio risk aggregation) is built and has real positions to aggregate.</div>
+  </div>
+{% endif %}
+
+{% endblock %}

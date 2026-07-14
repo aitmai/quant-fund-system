@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}Quant Fund System{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('gui.static', filename='css/style.css') }}">
+</head>
+<body>
+  <nav class="nav-bar">
+    <span class="nav-brand">AIDITORIAL / QUANT-FUND</span>
+    {% for endpoint, label in nav_items %}
+      <a class="nav-tab {% if request.endpoint == endpoint %}active{% endif %}" href="{{ url_for(endpoint) }}">{{ label }}</a>
+    {% endfor %}
+  </nav>
+
+  <div class="page">
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        {% for category, message in messages %}
+          <div class="flash flash-{{ category }}">{{ message }}</div>
+        {% endfor %}
+      {% endif %}
+    {% endwith %}
+
+    {% block content %}{% endblock %}
+  </div>
+</body>
+</html>

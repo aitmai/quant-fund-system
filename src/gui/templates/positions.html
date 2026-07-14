@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block title %}Positions & Trades · Quant Fund System{% endblock %}
+{% block content %}
+
+<div class="page-header"><h1>Positions &amp; Trades</h1></div>
+
+<div class="section card">
+  <h2>Current holdings</h2>
+  {% if positions %}
+    <div class="table-wrap">
+      <table>
+        <tr><th>Ticker</th><th>Sleeve</th><th>Qty</th><th>Cost basis</th><th>Market value</th><th>Unrealized P&L</th><th>Purchase date</th></tr>
+        {% for p in positions %}
+          <tr>
+            <td class="mono">{{ p.ticker }}</td>
+            <td>{{ p.sleeve }}</td>
+            <td class="mono">{{ p.quantity }}</td>
+            <td class="mono">{{ "$%.2f"|format(p.avg_cost_basis) if p.avg_cost_basis else "—" }}</td>
+            <td class="mono">{{ "$%.0f"|format(p.market_value) if p.market_value else "—" }}</td>
+            <td class="mono {{ 'positive' if p.unrealized_pnl and p.unrealized_pnl >= 0 else 'negative' if p.unrealized_pnl else '' }}">{{ "$%.0f"|format(p.unrealized_pnl) if p.unrealized_pnl is not none else "—" }}</td>
+            <td class="mono">{{ p.purchase_date or "—" }}</td>
+          </tr>
+        {% endfor %}
+      </table>
+    </div>
+  {% else %}
+    <div class="empty-state">
+      <div class="empty-title">No open positions</div>
+      <div class="empty-detail">positions fills in once Phase 7 (trade tracking) exists and a real trade has been executed.</div>
+    </div>
+  {% endif %}
+</div>
+
+<div class="section card">
+  <h2>Signal vs. execution</h2>
+  {% if signal_vs_execution %}
+    <div class="table-wrap">
+      <table>
+        <tr><th>Ticker</th><th>Date</th><th>Signaled $</th><th>Executed $</th><th>Executed?</th></tr>
+        {% for s in signal_vs_execution %}
+          <tr>
+            <td class="mono">{{ s.ticker }}</td>
+            <td class="mono">{{ s.trade_date }}</td>
+            <td class="mono">{{ "$%.0f"|format(s.signaled_dollars) if s.signaled_dollars else "—" }}</td>
+            <td class="mono">{{ "$%.0f"|format(s.executed_dollars) if s.executed_dollars else "—" }}</td>
+            <td><span class="pill status-{{ 'complete' if s.executed else 'queued' }}">{{ 'yes' if s.executed else 'pending' }}</span></td>
+          </tr>
+        {% endfor %}
+      </table>
+    </div>
+  {% else %}
+    <div class="empty-state"><div class="empty-title">Nothing to compare yet</div><div class="empty-detail">Needs daily_picks (Phase 5) and trades (Phase 7) both populated.</div></div>
+  {% endif %}
+</div>
+
+<div class="section card">
+  <h2>Trade ledger</h2>
+  <form method="get" style="display:flex;gap:8px;margin-bottom:12px;">
+    <select name="sleeve" onchange="this.form.submit()">
+      <option value="">All sleeves</option>
+      <option value="long" {% if selected_sleeve == "long" %}selected{% endif %}>Long</option>
+      <option value="hedge" {% if selected_sleeve == "hedge" %}selected{% endif %}>Hedge</option>
+    </select>
+    <select name="side" onchange="this.form.submit()">
+      <option value="">All sides</option>
+      <option value="buy" {% if selected_side == "buy" %}selected{% endif %}>Buy</option>
+      <option value="sell" {% if selected_side == "sell" %}selected{% endif %}>Sell</option>
+    </select>
+  </form>
+  {% if trades %}
+    <div class="table-wrap">
+      <table>
+        <tr><th>Date</th><th>Ticker</th><th>Side</th><th>Sleeve</th><th>Qty</th><th>Price</th><th>$ amount</th></tr>
+        {% for t in trades %}
+          <tr>
+            <td class="mono">{{ t.trade_date }}</td>
+            <td class="mono">{{ t.ticker }}</td>
+            <td>{{ t.side }}</td>
+            <td>{{ t.sleeve }}</td>
+            <td class="mono">{{ t.quantity }}</td>
+            <td class="mono">{{ "$%.2f"|format(t.price) if t.price else "—" }}</td>
+            <td class="mono">{{ "$%.0f"|format(t.dollar_amount) if t.dollar_amount else "—" }}</td>
+          </tr>
+        {% endfor %}
+      </table>
+    </div>
+  {% else %}
+    <div class="empty-state"><div class="empty-title">No trades logged yet</div></div>
+  {% endif %}
+</div>
+
+{% endblock %}

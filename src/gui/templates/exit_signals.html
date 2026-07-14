@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}Exit Signals · Quant Fund System{% endblock %}
+{% block content %}
+
+<div class="page-header"><h1>Exit Signals</h1></div>
+
+<div class="section card">
+  <h2>Rules</h2>
+  <div class="grid grid-3">
+    {% for r in rules %}
+      <div class="metric-card">
+        <div class="label">{{ r.rule_type.replace('_', ' ') }}</div>
+        <div class="value mono">{{ r.threshold_value if r.threshold_value is not none else "—" }}</div>
+        <div class="hint">{{ r.lookback_period or "" }}</div>
+      </div>
+    {% endfor %}
+  </div>
+</div>
+
+<div class="section card">
+  <h2>Signals</h2>
+  {% if signals %}
+    <div class="table-wrap">
+      <table>
+        <tr><th>Ticker</th><th>Date</th><th>Rule triggered</th><th>Score</th><th>Rank</th><th>Unrealized P&L</th><th>Action</th></tr>
+        {% for s in signals %}
+          <tr>
+            <td class="mono">{{ s.ticker }}</td>
+            <td class="mono">{{ s.signal_date }}</td>
+            <td>{{ s.rule_triggered }}</td>
+            <td class="mono">{{ "%.2f"|format(s.current_score) if s.current_score is not none else "—" }}</td>
+            <td class="mono">{{ s.current_rank if s.current_rank is not none else "—" }}</td>
+            <td class="mono {{ 'positive' if s.unrealized_pnl_pct and s.unrealized_pnl_pct >= 0 else 'negative' if s.unrealized_pnl_pct else '' }}">{{ "%.2f%%"|format(s.unrealized_pnl_pct) if s.unrealized_pnl_pct is not none else "—" }}</td>
+            <td>
+              <button class="btn btn-sm" disabled title="Enables once Phase 7 gives positions real purchase dates and a persisted exit-action column">Approve exit<span class="badge-not-enabled">Phase 7 pending</span></button>
+            </td>
+          </tr>
+        {% endfor %}
+      </table>
+    </div>
+  {% else %}
+    <div class="empty-state">
+      <div class="empty-title">No exit signals</div>
+      <div class="empty-detail">Needs Phase 6 (exit rule logic) and real positions with purchase dates (Phase 7) before anything can trigger here.</div>
+    </div>
+  {% endif %}
+</div>
+
+{% endblock %}
