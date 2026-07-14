@@ -173,11 +173,31 @@ class SECEdgarProvider:
         operating_cash_flow_by_period = _collect_duration_facts(us_gaap, _OPERATING_CASH_FLOW_TAGS)
         capex_by_period = _collect_duration_facts(us_gaap, _CAPEX_TAGS)
         eps_by_period = _collect_duration_facts(us_gaap, _EPS_TAGS)
-        shares_by_period = _collect_instant_facts(us_gaap, _SHARES_OUTSTANDING_TAGS)
-        shares_source = "us-gaap"
-        if not shares_by_period:
-            shares_by_period = _collect_instant_facts(dei, _SHARES_OUTSTANDING_DEI_TAGS)
+        # CONFIRMED (2026-07-14, WMT): committing to whichever source is
+        # non-empty FIRST silently throws away a better-covered source.
+        # WMT's us-gaap:CommonStockSharesOutstanding has data (6 points),
+        # but ALL of it comes from annual 10-Ks (~once per fiscal year) —
+        # `if not shares_by_period` only checks "is the dict empty," so a
+        # sparse-but-present us-gaap tag blocked the code from ever
+        # checking dei:EntityCommonStockSharesOutstanding, which for WMT
+        # has 69 points (nearly one per quarter). Merging both instant
+        # sources (rather than "first non-empty wins") means whichever
+        # source actually has a value for a given date gets used; where
+        # both have a value for the SAME date, us-gaap (a real
+        # balance-sheet fact) takes precedence over dei's cover-page
+        # disclosure, which is why it's merged second (later entries in a
+        # dict-merge win).
+        shares_us_gaap = _collect_instant_facts(us_gaap, _SHARES_OUTSTANDING_TAGS)
+        shares_dei = _collect_instant_facts(dei, _SHARES_OUTSTANDING_DEI_TAGS)
+        shares_by_period = {**shares_dei, **shares_us_gaap}
+        if shares_us_gaap and shares_dei:
+            shares_source = "us-gaap+dei (merged)"
+        elif shares_us_gaap:
+            shares_source = "us-gaap"
+        elif shares_dei:
             shares_source = "dei"
+        else:
+            shares_source = "none found"
         if not shares_by_period:
             # Weighted-average is a DURATION concept, not instant — approximates
             # a point-in-time count but isn't one. Used only because nothing

@@ -8,16 +8,28 @@ from src.providers.sec_edgar_provider import SECEdgarProvider, _pad_cik
 
 def _fake_company_facts(net_income=None, equity=None, liabilities=None, cash=None,
                           op_income=None, depreciation=None, op_cash_flow=None,
-                          capex=None, eps=None, shares=None, net_income_tag="NetIncomeLoss",
+                          capex=None, eps=None, shares=None, dei_shares=None,
+                          net_income_tag="NetIncomeLoss",
                           equity_tag="StockholdersEquity", eps_tag="EarningsPerShareDiluted"):
-    """Builds a minimal-but-realistic companyfacts JSON shape."""
+    """Builds a minimal-but-realistic companyfacts JSON shape.
+
+    `shares` populates us-gaap:CommonStockSharesOutstanding (a real
+    balance-sheet fact, often only tagged annually for some companies —
+    confirmed: WMT). `dei_shares` populates dei:EntityCommonStockSharesOutstanding
+    (a cover-page disclosure, often tagged closer to every quarter) —
+    kept as a SEPARATE parameter so tests can simulate a company with
+    both, either, or neither present."""
     us_gaap = {}
+    dei = {}
 
     def duration_concept(entries):
         return {"units": {"USD": [{"start": s, "end": e, "val": v} for s, e, v in entries]}}
 
     def instant_concept(entries):
         return {"units": {"USD": [{"end": e, "val": v} for e, v in entries]}}
+
+    def instant_shares_concept(entries):
+        return {"units": {"shares": [{"end": e, "val": v} for e, v in entries]}}
 
     if net_income:
         us_gaap[net_income_tag] = duration_concept(net_income)
@@ -38,9 +50,11 @@ def _fake_company_facts(net_income=None, equity=None, liabilities=None, cash=Non
     if eps:
         us_gaap[eps_tag] = duration_concept(eps)
     if shares:
-        us_gaap["CommonStockSharesOutstanding"] = instant_concept(shares)
+        us_gaap["CommonStockSharesOutstanding"] = instant_shares_concept(shares)
+    if dei_shares:
+        dei["EntityCommonStockSharesOutstanding"] = instant_shares_concept(dei_shares)
 
-    return {"facts": {"us-gaap": us_gaap, "dei": {}}}
+    return {"facts": {"us-gaap": us_gaap, "dei": dei}}
 
 
 class TestSECEdgarProvider(unittest.TestCase):
@@ -326,6 +340,59 @@ class TestSECEdgarProvider(unittest.TestCase):
 
         rows = self.provider.fetch_fundamentals("TEST", "0000320193", conn=conn)
         self.assertIsNone(rows[0].ev_ebitda)
+
+    @patch.object(SECEdgarProvider, "_fetch_company_facts")
+    def test_sparse_us_gaap_shares_does_not_block_richer_dei_source(self, mock_fetch):
+        # CONFIRMED (2026-07-14, live WMT data): us-gaap:CommonStockSharesOutstanding
+        # had 6 data points total (annual 10-Ks only), while
+        # dei:EntityCommonStockSharesOutstanding had 69 (near-quarterly).
+        # The OLD "first non-empty source wins" logic committed to the
+        # sparse us-gaap source just because it wasn't empty, and never
+        # even looked at dei — silently discarding far better coverage.
+        # This period's report date only has a dei value, not a us-gaap
+        # one (simulating a quarter with no annual filing) — market cap
+        # should still resolve via the merged dict.
+        mock_fetch.return_value = _fake_company_facts(
+            net_income=[("2025-10-01", "2025-12-31", 1000000)],
+            equity=[("2025-12-31", 10000000)],
+            liabilities=[("2025-12-31", 2000000)],
+            op_income=[("2025-10-01", "2025-12-31", 1200000)],
+            shares=[("2024-01-31", 5000)],       # sparse: only an OLD annual period
+            dei_shares=[("2025-12-31", 1000)],   # rich: covers THIS quarter
+        )
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.fetchall.return_value = [(date(2025, 12, 20), 100.0)]
+        conn.cursor.return_value.__enter__.return_value = cursor
+
+        rows = self.provider.fetch_fundamentals("TEST", "0000320193", conn=conn)
+        # market_cap = 1000 (dei shares for THIS period) * 100 (price) = 100,000
+        self.assertIsNotNone(rows[0].ev_ebitda)
+
+    @patch.object(SECEdgarProvider, "_fetch_company_facts")
+    def test_us_gaap_shares_take_precedence_over_dei_on_same_date(self, mock_fetch):
+        # When BOTH sources have a value for the exact same date, us-gaap
+        # (a real balance-sheet fact) should win over dei (a cover-page
+        # disclosure) — confirms the merge order, not just "a merge happens".
+        mock_fetch.return_value = _fake_company_facts(
+            net_income=[("2025-10-01", "2025-12-31", 1000000)],
+            equity=[("2025-12-31", 10000000)],
+            liabilities=[("2025-12-31", 2000000)],
+            op_income=[("2025-10-01", "2025-12-31", 1200000)],
+            shares=[("2025-12-31", 1000)],      # us-gaap: should win
+            dei_shares=[("2025-12-31", 99999)],  # dei: should be overridden
+        )
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.fetchall.return_value = [(date(2025, 12, 20), 100.0)]
+        conn.cursor.return_value.__enter__.return_value = cursor
+
+        rows = self.provider.fetch_fundamentals("TEST", "0000320193", conn=conn)
+        # market_cap should be 1000 * 100 = 100,000 (us-gaap shares), not
+        # 99999 * 100 — ebitda = op_income(1200000) since no depreciation,
+        # enterprise_value = 100,000 + 2,000,000 - 0 = 2,100,000
+        expected_ev_ebitda = 2_100_000 / 1_200_000
+        self.assertAlmostEqual(rows[0].ev_ebitda, expected_ev_ebitda, places=6)
 
 
         # Combined `Liabilities` tag absent entirely (confirmed: WMT) —
