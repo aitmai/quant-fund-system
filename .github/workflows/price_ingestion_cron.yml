@@ -14,13 +14,21 @@ name: daily-price-ingestion
 
 on:
   schedule:
-    # 13:30 UTC = after US market close settles, before the next day's
-    # cron stacks up. Runs every day, not just weekdays — maintenance
-    # fetches for already-backfilled tickers are cheap either way, and
-    # skipping weekends adds complexity for negligible budget savings.
-    # - cron: "30 13 * * *"
+    # Hourly, not once/day (2026-07-14 change) — Tiingo (now the primary
+    # provider, see ingestion_config.active_provider) caps at ~50
+    # requests/hour on the free tier. The in-process circuit breaker in
+    # provider_factory.py resets on every fresh cron run, so an hourly
+    # cadence lets each run claim its own ~50-ticker Tiingo window rather
+    # than burning through daily_budget in one shot and spending the
+    # rest of the day failing against a dead yfinance fallback. Once the
+    # backfill catches up, hourly runs just do cheap 1-day-delta
+    # maintenance fetches — fine to leave hourly, or dial back later.
+    #
+    # Offset to :17 rather than :00 — GitHub's own docs warn scheduled
+    # workflows can be delayed or dropped under load, and recommend
+    # avoiding the top of the hour, since that's when the largest number
+    # of other repos' cron jobs also fire.
     - cron: "17 * * * *"
-
   workflow_dispatch: {}
 
 jobs:
