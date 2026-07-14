@@ -19,11 +19,8 @@ on:
     # fetches for already-backfilled tickers are cheap either way, and
     # skipping weekends adds complexity for negligible budget savings.
     # - cron: "30 13 * * *"
-<<<<<<< HEAD
-    - cron: "0 * * * *"
-=======
     - cron: "17 * * * *"
->>>>>>> 9da09c4 (Fix hourly cronjob)
+
   workflow_dispatch: {}
 
 jobs:
