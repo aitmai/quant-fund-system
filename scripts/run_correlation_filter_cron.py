@@ -15,13 +15,23 @@ other way around.
 
 KNOWN v1 LIMITATIONS (explicit open items, same pattern as this repo's
 other phase addenda):
-  - Sector-cap dollar sizing uses a flat $1,000 per accepted candidate
-    (matching DESIGN.md Stage 5's own "Base_$1000" reference amount) as
-    an approximation for the cap check — Stage 5's real risk-parity size
-    isn't known yet at this point in the pipeline (it runs AFTER this
-    stage). At this fund's trade size, DESIGN.md itself notes $1,000/day
-    is small enough that this approximation has negligible practical
-    effect on the cap check's outcome.
+  - **Sector cap is count-based, not dollar-based, and this is a real
+    deviation from DESIGN.md's literal wording** ("reject a candidate
+    if adding it would push that GICS sector above a configured
+    ceiling of total NAV"). Found via a live run on 2026-07-15: a
+    dollar-based check needs a real per-candidate dollar size, and
+    Stage 5 (which computes that) hasn't run yet at this point in the
+    pipeline — approximating with a flat placeholder dollar amount
+    turned out to be mathematically toothless at this fund's NAV (even
+    50 candidates at $1,000 each is only 5% of a ~$1M NAV, nowhere near
+    a 15% cap, so the check could never fire). Instead: no more than
+    TARGET_SHORTLIST_SIZE * SECTOR_CAP_PCT names in the ACCEPTED
+    shortlist may share a sector — same 15% figure, applied to name-
+    count instead of dollars, which directly bounds "one sector
+    dominates the list" without depending on a Stage 5 number that
+    doesn't exist yet. Revisit once Stage 5 is live: a two-pass design
+    (rough-size candidates, THEN apply the real dollar-based cap) would
+    match DESIGN.md's literal spec more closely.
   - A candidate with fewer than MIN_CORRELATION_HISTORY_DAYS of
     price_history is let through with correlation_flag=False rather
     than excluded — logged via job.note(), not silently skipped. A
@@ -59,8 +69,9 @@ STAGE3_SHORTLIST_SIZE = int(os.environ.get("STAGE3_SHORTLIST_SIZE", "50"))
 CORRELATION_WINDOW_DAYS = int(os.environ.get("CORRELATION_WINDOW_DAYS", "60"))
 CORRELATION_EXCLUSION_THRESHOLD = float(os.environ.get("CORRELATION_EXCLUSION_THRESHOLD", "0.85"))
 SECTOR_CAP_PCT = float(os.environ.get("SECTOR_CAP_PCT", "0.15"))
+TARGET_SHORTLIST_SIZE = int(os.environ.get("TARGET_SHORTLIST_SIZE", "20"))  # DESIGN.md's stated Stage 4 output target (~10-20 names)
+MAX_NAMES_PER_SECTOR = max(1, round(TARGET_SHORTLIST_SIZE * SECTOR_CAP_PCT))
 MIN_CORRELATION_HISTORY_DAYS = 30  # below this, correlation isn't computed, sector cap still applies
-BASE_DOLLAR_AMOUNT = 1000.0  # matches DESIGN.md Stage 5's "Base_$1000" — see module docstring
 
 
 def _fetch_stage3_shortlist(cur, score_date, limit):
@@ -115,17 +126,7 @@ def _fetch_returns_matrix(cur, tickers, as_of_date, window_days):
     df["close"] = df["close"].astype(float)
     wide = df.pivot(index="date", columns="ticker", values="close").sort_index()
     wide = wide.tail(window_days + 1)  # +1 so pct_change() yields window_days return observations
-    return wide.pct_change().dropna(how="all")
-
-
-def _get_total_nav(cur):
-    cur.execute("SELECT total_nav FROM portfolio_snapshots ORDER BY snapshot_date DESC LIMIT 1")
-    row = cur.fetchone()
-    if row and row[0]:
-        return float(row[0])
-    cur.execute("SELECT initial_capital FROM fund_metadata WHERE id = 1")
-    row = cur.fetchone()
-    return float(row[0]) if row and row[0] else None
+    return wide.pct_change(fill_method=None).dropna(how="all")
 
 
 def main():
@@ -146,30 +147,24 @@ def main():
 
                 held = _fetch_held_long_positions(cur)
                 held_tickers = [t for t, _ in held]
-                held_market_value = {t: float(mv) if mv else 0.0 for t, mv in held}
 
                 candidate_tickers = [t for t, _ in candidates]
                 all_tickers = list(set(candidate_tickers) | set(held_tickers))
 
                 sectors = _fetch_sectors(cur, all_tickers)
                 returns = _fetch_returns_matrix(cur, all_tickers, score_date, CORRELATION_WINDOW_DAYS)
-                total_nav = _get_total_nav(cur)
-                if total_nav is None:
-                    print(
-                        "ERROR: no fund_metadata/portfolio_snapshots found — cannot compute sector cap "
-                        "without a NAV to measure it against. Run scripts/init_fund_metadata.py first.",
-                        file=sys.stderr,
-                    )
-                    sys.exit(1)
 
             corr_matrix = returns.corr() if not returns.empty else pd.DataFrame()
 
-            # Running sector exposure starts from what's actually held today.
-            sector_exposure = {}
+            # Running sector COUNT starts from what's actually held today —
+            # a sector already concentrated in the real book should count
+            # against new candidates from the same sector, same as the
+            # dollar-based version DESIGN.md describes would.
+            sector_counts = {}
             for t in held_tickers:
                 sector = sectors.get(t)
                 if sector:
-                    sector_exposure[sector] = sector_exposure.get(sector, 0.0) + held_market_value.get(t, 0.0)
+                    sector_counts[sector] = sector_counts.get(sector, 0) + 1
 
             accepted = []
             results = []  # (ticker, correlation_flag, sector_cap_flag, excluded_due_to, final_rank)
@@ -189,18 +184,17 @@ def main():
                 elif not has_history:
                     job.note(f"{ticker}: insufficient price history for correlation check, sector cap still applied")
 
-                if excluded_due_to is None:
-                    sector = sectors.get(ticker)
-                    if sector:
-                        projected = sector_exposure.get(sector, 0.0) + BASE_DOLLAR_AMOUNT
-                        if projected / total_nav > SECTOR_CAP_PCT:
-                            sector_cap_flag = True
-                            excluded_due_to = f"sector_cap ({sector}, {projected / total_nav:.1%} > {SECTOR_CAP_PCT:.0%})"
+                sector = sectors.get(ticker)
+                if excluded_due_to is None and sector:
+                    current_count = sector_counts.get(sector, 0)
+                    if current_count + 1 > MAX_NAMES_PER_SECTOR:
+                        sector_cap_flag = True
+                        excluded_due_to = f"sector_cap ({sector}, would be {current_count + 1} names > max {MAX_NAMES_PER_SECTOR})"
 
                 if excluded_due_to is None:
                     accepted.append(ticker)
                     if sector:
-                        sector_exposure[sector] = sector_exposure.get(sector, 0.0) + BASE_DOLLAR_AMOUNT
+                        sector_counts[sector] = sector_counts.get(sector, 0) + 1
                     final_rank = len(accepted)
                 else:
                     final_rank = None
