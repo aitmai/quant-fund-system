@@ -1,11 +1,13 @@
-# Phase 2 factor scoring (DESIGN.md §3 Stage 2, §7 — "Weekly cron").
+# Phase 2 factor scoring (DESIGN.md §3 Stage 2, §7).
 #
-# Deliberately manual-trigger-only for now, NOT scheduled — this is a
-# brand-new module and hasn't been validated against a live run yet.
-# Trigger manually, check the printed diagnostic summary (populated vs.
-# missing per factor, against total active tickers), and uncomment the
-# `schedule:` block once a run looks right.
-name: weekly-factor-scoring
+# Switched from weekly (Sunday) to daily (weekdays) on 2026-07-15 — the
+# new daily-picks pipeline (Stage 3-5, top-10 buy list generated each
+# weekday evening) needs a same-day factor_scores row to rank against;
+# a Sunday-only score would leave every weekday's ranking run working
+# off up to 4-day-stale factors. Weekly backfill/validation (151/151
+# weeks, 0 failed, 2026-07-15) is done and this has been validated
+# against a live run, so enabling the schedule now.
+name: daily-factor-scoring
 
 on:
   workflow_dispatch:
@@ -14,8 +16,13 @@ on:
         description: "Score as of this date (YYYY-MM-DD). Leave blank for today."
         required: false
         type: string
-  # schedule:
-  #   - cron: "0 8 * * 0"   # Sunday 08:00 UTC, before Monday's market open — uncomment once validated
+  schedule:
+    # 21:50 UTC, Mon-Fri = ~5:50pm EDT / ~4:50pm EST — after the 4pm ET
+    # close, with buffer for that hour's price-ingestion tick (:17, see
+    # price_ingestion_cron.yml) to land first. Feeds the daily-picks
+    # pipeline's ~7-8pm EST target window downstream. Offset from :00
+    # per this repo's established convention (avoid the top of the hour).
+    - cron: "50 21 * * 1-5"
 
 jobs:
   score:

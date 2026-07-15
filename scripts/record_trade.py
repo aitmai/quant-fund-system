@@ -76,7 +76,15 @@ def _get_position(cur, ticker: str, sleeve: str):
         "SELECT quantity, avg_cost_basis, purchase_date FROM positions WHERE ticker = %s AND sleeve = %s",
         (ticker, sleeve),
     )
-    return cur.fetchone()
+    row = cur.fetchone()
+    if row is None:
+        return None
+    # psycopg2 returns NUMERIC columns as decimal.Decimal, not float — cast
+    # here, once, so every caller downstream can freely mix these with the
+    # plain floats coming from argparse (--price, --quantity) without
+    # hitting "unsupported operand type(s) for -: 'Decimal' and 'float'".
+    quantity, avg_cost_basis, purchase_date = row
+    return (float(quantity), float(avg_cost_basis), purchase_date)
 
 
 def _record_buy(cur, ticker, sleeve, quantity, price, trade_date):
