@@ -63,13 +63,22 @@ def get_latest_portfolio_snapshot(conn):
 def get_pipeline_stage_status(conn):
     """Most recent job_runs row per known stage, for the Dashboard's
     pipeline-chain visualization and status row. A stage with no rows at
-    all means its phase hasn't been built yet — 'idle', not 'failed'."""
+    all means its phase hasn't been built yet — 'idle', not 'failed'.
+
+    Excludes triggered_by='backfill' rows: Phase 3's retroactive backfill
+    (scripts/backfill_factor_scores.py) logs under stage='factor_scoring',
+    the same stage real weekly cron uses. Backfill runs happen with
+    today's wall-clock timestamps, so without this filter a multi-day
+    backfill would become the 'most recent' factor_scoring row and this
+    screen would silently stop reflecting real cron health — exactly the
+    signal DESIGN.md's full-week-of-cron checkpoint depends on."""
     with conn.cursor() as cur:
         cur.execute(
             """
             SELECT DISTINCT ON (stage) stage, run_type, triggered_by,
                    start_time, end_time, status, error_message
             FROM job_runs
+            WHERE triggered_by != 'backfill'
             ORDER BY stage, start_time DESC
             """
         )
@@ -274,12 +283,33 @@ def get_pipeline_runs(conn, stage=None, run_type=None, limit=50):
 
 
 def get_latest_factor_scores(conn, limit=25):
+    # CONFIRMED (2026-07-14): factor_scores' PRIMARY KEY is (ticker,
+    # score_date, run_id) — INTENTIONALLY keeps every run as its own row
+    # for audit history, not overwritten. But run_id is a random UUID
+    # (job_run.py: f"{stage}-{uuid4().hex[:10]}"), NOT chronologically
+    # sortable — so a plain `WHERE score_date = MAX(score_date)` returns
+    # EVERY run from today mixed together, with no way to tell which row
+    # per ticker is actually the latest. On a day with several manual
+    # re-runs (common while iterating), this silently mixes stale and
+    # fresh values for the same ticker with no indication anything is
+    # wrong. Fixed by joining to job_runs (which DOES have start_time)
+    # and keeping only the most-recent run per ticker via ROW_NUMBER().
     with conn.cursor() as cur:
         cur.execute(
             """
+            WITH ranked AS (
+                SELECT fs.ticker, fs.score_date, fs.momentum_z, fs.quality_z,
+                       fs.value_z, fs.lowvol_z, fs.decile_rank,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY fs.ticker ORDER BY jr.start_time DESC
+                       ) AS rn
+                FROM factor_scores fs
+                JOIN job_runs jr ON jr.run_id = fs.run_id
+                WHERE fs.score_date = (SELECT MAX(score_date) FROM factor_scores)
+            )
             SELECT ticker, score_date, momentum_z, quality_z, value_z, lowvol_z, decile_rank
-            FROM factor_scores
-            WHERE score_date = (SELECT MAX(score_date) FROM factor_scores)
+            FROM ranked
+            WHERE rn = 1
             ORDER BY momentum_z DESC NULLS LAST
             LIMIT %s
             """,

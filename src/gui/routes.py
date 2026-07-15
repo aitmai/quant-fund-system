@@ -41,6 +41,7 @@ NAV_ITEMS = [
     ("gui.positions", "Positions"),
     ("gui.exit_signals", "Exit signals"),
     ("gui.hedge", "Hedge"),
+    ("gui.portfolio_risk", "Portfolio risk"),
     ("gui.backtest", "Backtest"),
 ]
 

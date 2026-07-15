@@ -52,26 +52,46 @@ FIXTURES = {
 
 
 def _make_client():
-    """Patches get_db_connection + every queries function, returns a test client."""
-    patcher = patch("src.gui.routes.get_db_connection", return_value=MagicMock())
-    patcher.start()
+    """Patches get_db_connection + every queries function, returns a test
+    client and the list of active patchers.
+
+    CONFIRMED (2026-07-14): the original version used raw `setattr(q, name,
+    ...)` to stub queries functions, with no corresponding restore — only
+    the get_db_connection patch was ever stopped in tearDown. That
+    permanently replaced e.g. `queries.get_latest_factor_scores` with a
+    static-value lambda for the REST OF THE PYTEST SESSION, silently
+    breaking any test file that imports the real queries module and runs
+    afterward (confirmed via test_gui_queries.py failing only when run
+    after this file, never in isolation). Fixed by using patch.object for
+    every stub, which correctly restores the original function on
+    p.stop() — same as the get_db_connection patch already did it right.
+    """
+    patchers = [patch("src.gui.routes.get_db_connection", return_value=MagicMock())]
 
     import src.gui.queries as q
     for name, val in FIXTURES.items():
-        setattr(q, name, (lambda v: (lambda conn, *a, **kw: v))(val))
+        patchers.append(patch.object(q, name, lambda conn, *a, __v=val, **kw: __v))
+
+    for p in patchers:
+        p.start()
 
     from src.gui import create_app
     app = create_app()
     app.config["TESTING"] = True
-    return app.test_client(), patcher
+    return app.test_client(), patchers
+
+
+def _stop_patchers(patchers):
+    for p in patchers:
+        p.stop()
 
 
 class TestGuiRoutesRender(unittest.TestCase):
     def setUp(self):
-        self.client, self.patcher = _make_client()
+        self.client, self.patchers = _make_client()
 
     def tearDown(self):
-        self.patcher.stop()
+        _stop_patchers(self.patchers)
 
     def test_all_get_routes_render_200(self):
         routes = [
@@ -120,29 +140,31 @@ class TestGuiRoutesRender(unittest.TestCase):
 
 class TestGuiWriteActions(unittest.TestCase):
     def setUp(self):
-        self.client, self.patcher = _make_client()
+        self.client, self.patchers = _make_client()
         import src.gui.queries as q
         self.add_calls = []
-        q.add_manual_ticker = lambda *a, **kw: self.add_calls.append((a, kw))
-        q.prioritize_ticker = lambda *a, **kw: None
-        q.force_refresh_ticker = lambda *a, **kw: None
-        q.queue_backtest_run = lambda *a, **kw: "bt-testid1234"
+
+        def _record_add(*a, **kw):
+            self.add_calls.append((a, kw))
 
         import src.scoring.run_factor_scoring as rfs
-        self._orig_run = rfs.run
-        rfs.run = lambda conn, job=None, score_date=None: {"total_active": 503}
-
         import src.job_run as jr
-        self._orig_enter, self._orig_exit = jr.JobRun.__enter__, jr.JobRun.__exit__
-        jr.JobRun.__enter__ = lambda self: self
-        jr.JobRun.__exit__ = lambda self, *a: False
+
+        extra_patches = [
+            patch.object(q, "add_manual_ticker", _record_add),
+            patch.object(q, "prioritize_ticker", lambda *a, **kw: None),
+            patch.object(q, "force_refresh_ticker", lambda *a, **kw: None),
+            patch.object(q, "queue_backtest_run", lambda *a, **kw: "bt-testid1234"),
+            patch.object(rfs, "run", lambda conn, job=None, score_date=None: {"total_active": 503}),
+            patch.object(jr.JobRun, "__enter__", lambda self: self),
+            patch.object(jr.JobRun, "__exit__", lambda self, *a: False),
+        ]
+        for p in extra_patches:
+            p.start()
+        self.patchers.extend(extra_patches)
 
     def tearDown(self):
-        self.patcher.stop()
-        import src.scoring.run_factor_scoring as rfs
-        rfs.run = self._orig_run
-        import src.job_run as jr
-        jr.JobRun.__enter__, jr.JobRun.__exit__ = self._orig_enter, self._orig_exit
+        _stop_patchers(self.patchers)
 
     def test_add_manual_ticker(self):
         resp = self.client.post("/universe/add", data={"ticker": "TSLA", "sector": "Consumer"}, follow_redirects=True)
