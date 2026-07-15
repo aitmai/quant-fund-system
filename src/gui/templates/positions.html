@@ -5,6 +5,33 @@
 <div class="page-header"><h1>Positions &amp; Trades</h1></div>
 
 <div class="section card">
+  <h2>Tomorrow's picks</h2>
+  {% if upcoming_picks %}
+    <div class="table-wrap">
+      <table>
+        <tr><th>Rank</th><th>Ticker</th><th>Target $</th><th>Target vol</th><th>Realized vol</th><th>Trade date</th><th>Status</th></tr>
+        {% for p in upcoming_picks %}
+          <tr>
+            <td class="mono">{{ loop.index }}</td>
+            <td class="mono">{{ p.ticker }}</td>
+            <td class="mono">{{ "$%.2f"|format(p.dollar_allocated) if p.dollar_allocated else "—" }}</td>
+            <td class="mono">{{ "%.1f%%"|format(p.target_vol * 100) if p.target_vol is not none else "—" }}</td>
+            <td class="mono">{{ "%.1f%%"|format(p.realized_vol * 100) if p.realized_vol is not none else "—" }}</td>
+            <td class="mono">{{ p.trade_date }}</td>
+            <td><span class="pill status-{{ 'complete' if p.executed else 'queued' }}">{{ 'executed' if p.executed else 'pending' }}</span></td>
+          </tr>
+        {% endfor %}
+      </table>
+    </div>
+  {% else %}
+    <div class="empty-state">
+      <div class="empty-title">No picks generated yet</div>
+      <div class="empty-detail">Runs each weekday evening once Stage 2-5 (factor scoring -> ML ranking -> correlation filter -> risk sizing) complete.</div>
+    </div>
+  {% endif %}
+</div>
+
+<div class="section card">
   <h2>Current holdings</h2>
   {% if positions %}
     <div class="table-wrap">

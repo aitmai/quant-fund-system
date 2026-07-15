@@ -25,6 +25,7 @@ FIXTURES = {
         {"stage": "ml_ranking", "label": "Stage 3 · ML Ranking", "status": "idle", "row": None},
     ],
     "get_todays_pick": [{"ticker": "AAPL", "dollar_allocated": 5000, "executed": False}],
+    "get_upcoming_picks": [{"ticker": "WAT", "trade_date": date(2026, 7, 16), "dollar_allocated": 688.60, "target_vol": 0.15, "realized_vol": 0.218, "executed": False}],
     "get_latest_portfolio_risk_snapshot": {"portfolio_vol": 12.5, "portfolio_beta": 0.9, "sector_concentration": {"Technology": 22.0}, "factor_exposure": {"momentum": 0.4}},
     "get_trailing_returns": [
         {"label": "1 month", "has_history": True, "portfolio_return_pct": 1.2, "benchmark_return_pct": None},

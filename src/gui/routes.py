@@ -177,6 +177,7 @@ def positions():
     return render_template(
         "positions.html",
         nav_items=NAV_ITEMS,
+        upcoming_picks=queries.get_upcoming_picks(conn),
         positions=queries.get_positions(conn),
         trades=queries.get_trades(conn, sleeve=sleeve, side=side),
         signal_vs_execution=queries.get_signal_vs_execution(conn),

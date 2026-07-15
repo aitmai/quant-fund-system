@@ -95,11 +95,27 @@ def get_pipeline_stage_status(conn):
 
 
 def get_todays_pick(conn):
+    # Scoped to the single most recent completed risk_sizing run for the
+    # latest trade_date — daily_picks has no run-level dedup (same class
+    # of bug found and fixed in scripts/run_risk_sizing_cron.py's own
+    # read of correlation_filtered_shortlist, 2026-07-15): re-running
+    # Stage 5 more than once for the same trade_date accumulates a NEW
+    # set of rows rather than replacing the old ones, so an unscoped
+    # query here would show duplicate/stale picks after any rerun.
     with conn.cursor() as cur:
         cur.execute(
             """
+            WITH latest_run AS (
+                SELECT dp.run_id
+                FROM daily_picks dp
+                JOIN job_runs j ON j.run_id = dp.run_id
+                WHERE dp.trade_date = (SELECT MAX(trade_date) FROM daily_picks)
+                ORDER BY j.start_time DESC
+                LIMIT 1
+            )
             SELECT * FROM daily_picks
             WHERE trade_date = (SELECT MAX(trade_date) FROM daily_picks)
+                  AND run_id = (SELECT run_id FROM latest_run)
             ORDER BY dollar_allocated DESC NULLS LAST
             """
         )
@@ -339,6 +355,33 @@ def get_trades(conn, sleeve=None, side=None, limit=100):
     params.append(limit)
     with conn.cursor() as cur:
         cur.execute(query, params)
+        return cur.fetchall()
+
+
+def get_upcoming_picks(conn):
+    """The latest trade_date's daily_picks, scoped to only the most
+    recent completed risk_sizing run for that date (same run-scoping
+    fix as get_todays_pick — see that function's comment for why this
+    matters). This is what the Positions tab's "Tomorrow's Picks" card
+    reads — the actual output of the full Stage 2->3->4->5 pipeline,
+    not yet executed."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            WITH latest_run AS (
+                SELECT dp.run_id
+                FROM daily_picks dp
+                JOIN job_runs j ON j.run_id = dp.run_id
+                WHERE dp.trade_date = (SELECT MAX(trade_date) FROM daily_picks)
+                ORDER BY j.start_time DESC
+                LIMIT 1
+            )
+            SELECT * FROM daily_picks
+            WHERE trade_date = (SELECT MAX(trade_date) FROM daily_picks)
+                  AND run_id = (SELECT run_id FROM latest_run)
+            ORDER BY dollar_allocated DESC NULLS LAST
+            """
+        )
         return cur.fetchall()
 
 
