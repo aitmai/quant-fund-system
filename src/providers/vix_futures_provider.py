@@ -20,12 +20,12 @@ VIX futures, not Close. Every price this module returns is Settle.
 from dataclasses import dataclass
 from datetime import date
 from io import StringIO
-from typing import Optional
+from typing import Optional, Tuple
 
 import pandas as pd
 import requests
 
-from src.hedge.vix_futures_calendar import front_and_next_month_contracts
+from src.hedge.vix_futures_calendar import effective_sizing_contract, front_and_next_month_contracts
 
 CBOE_VX_CSV_URL = "https://cdn.cboe.com/data/us/futures/market_statistics/historical_data/VX/VX_{expiration}.csv"
 REQUEST_TIMEOUT_SECONDS = 30
@@ -119,6 +119,21 @@ class TermStructureSnapshot:
         roll-cost tracking (DESIGN.md: 'contango/backwardation drag from
         the roll is explicitly modeled — logged as a running cost')."""
         return (self.next_month.settle - self.front_month.settle) / self.front_month.settle * 100.0
+
+
+def fetch_effective_sizing_quote(
+    as_of: Optional[date] = None, roll_window_trading_days: int = 5
+) -> Tuple[VixFuturesQuote, bool]:
+    """The settle price for whichever contract should actually be used
+    for hedge SIZING today — applies the 5-trading-day roll rule (see
+    vix_futures_calendar.effective_sizing_contract), unlike
+    fetch_term_structure()'s front/next, which deliberately stays on the
+    pure calendar-nearest contracts for signal purposes regardless of
+    the roll decision. Returns (quote, rolled)."""
+    as_of = as_of or date.today()
+    contract_exp, rolled = effective_sizing_contract(as_of, roll_window_trading_days)
+    quote = fetch_contract_settle(contract_exp)
+    return quote, rolled
 
 
 def fetch_term_structure(as_of: Optional[date] = None) -> TermStructureSnapshot:

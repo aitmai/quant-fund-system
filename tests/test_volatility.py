@@ -55,16 +55,35 @@ class TestGarchForecastAnnualized(unittest.TestCase):
         # every other Phase 9 data source. Verified live before writing
         # volatility.py; this test guards against a future arch upgrade
         # silently changing the API shape this module depends on.
-        np.random.seed(42)
-        returns_pct = pd.Series(np.random.normal(0, 1.2, 750))
+        #
+        # IMPORTANT: uses a genuinely SIMULATED GARCH(1,1) process, not
+        # plain i.i.d. normal noise. Pure noise has no real volatility
+        # clustering, so the optimizer lands on a degenerate boundary
+        # solution (alpha=0.0000, confirmed) — which converged on Linux
+        # but failed to converge on Windows with a real ConvergenceWarning
+        # ("Inequality constraints incompatible"), a genuine cross-
+        # platform/scipy-version flakiness caught during real testing.
+        # Simulating actual GARCH structure converges to a proper
+        # interior solution reliably (confirmed: fits recover parameters
+        # close to the true simulated omega/alpha/beta).
+        rng = np.random.RandomState(42)
+        n = 750
+        omega, alpha, beta = 0.05, 0.10, 0.85
+        sigma2 = np.zeros(n)
+        returns = np.zeros(n)
+        sigma2[0] = omega / (1 - alpha - beta)
+        for t in range(1, n):
+            sigma2[t] = omega + alpha * returns[t - 1] ** 2 + beta * sigma2[t - 1]
+            returns[t] = rng.normal(0, np.sqrt(sigma2[t]))
+        returns_pct = pd.Series(returns)
 
         vol = garch_forecast_annualized(returns_pct, horizon=1)
 
         self.assertIsNotNone(vol)
         self.assertGreater(vol, 0.0)
-        # Sanity range for daily-pct-scale synthetic data with ~1.2 std —
-        # not a tight bound, just guards against a units/scaling bug
-        # (e.g. forgetting to annualize, or double-annualizing).
+        # Sanity range — not a tight bound, just guards against a
+        # units/scaling bug (e.g. forgetting to annualize, or
+        # double-annualizing).
         self.assertLess(vol, 1.0)
 
     def test_all_nan_series_returns_none_not_exception(self):

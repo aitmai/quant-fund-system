@@ -56,32 +56,65 @@ def _next_contract_month(year: int, month: int) -> Tuple[int, int]:
     return year, month + 1
 
 
-def front_and_next_month_contracts(as_of: date) -> Tuple[date, date]:
-    """Returns (front_month_expiration, next_month_expiration) — the two
-    nearest not-yet-expired VIX futures contracts as of `as_of`. Needed
-    both for the roll rule (DESIGN.md: roll 5 trading days before
-    front-month expiry) and for computing the term-structure signal
-    (contango/backwardation is a front-vs-next-month price comparison).
-
-    Starts scanning from the month before `as_of`'s month, since a
-    contract nominally labeled for an earlier month can still expire
-    later within the current month (VIX futures expire mid-month, not
-    at month-end) — starting one month back guarantees the true nearest
-    unexpired contract is never skipped.
-    """
+def nearest_unexpired_contracts(as_of: date, count: int) -> list:
+    """The `count` nearest not-yet-expired contract expirations as of
+    `as_of`, ascending. Shared scanning logic behind both
+    front_and_next_month_contracts (count=2) and the roll-aware sizing
+    path (count=3, to have a genuine next-month lined up even after
+    rolling past the calendar front-month)."""
     year, month = as_of.year, as_of.month
-    # Step back one month to make sure we don't skip a contract whose
-    # label is "last month" but whose expiration is still ahead of as_of.
     if month == 1:
         year, month = year - 1, 12
     else:
         month -= 1
 
     unexpired = []
-    while len(unexpired) < 2:
+    while len(unexpired) < count:
         exp = vix_futures_expiration(year, month)
         if exp >= as_of:
             unexpired.append(exp)
         year, month = _next_contract_month(year, month)
+    return unexpired
 
-    return unexpired[0], unexpired[1]
+
+def front_and_next_month_contracts(as_of: date) -> Tuple[date, date]:
+    """Returns (front_month_expiration, next_month_expiration) — the two
+    nearest not-yet-expired VIX futures contracts as of `as_of`, with no
+    roll-window adjustment. Needed for term-structure signal computation
+    on its own terms (contango/backwardation is inherently a comparison
+    between whatever is calendar-front and calendar-next, independent of
+    any roll decision). For the CONTRACT ACTUALLY USED FOR SIZING, see
+    effective_sizing_contract, which applies the 5-trading-day roll rule
+    on top of this.
+    """
+    front, nxt = nearest_unexpired_contracts(as_of, count=2)
+    return front, nxt
+
+
+def effective_sizing_contract(as_of: date, roll_window_trading_days: int = 5) -> Tuple[date, bool]:
+    """The contract that should actually be used for hedge SIZING today
+    (as opposed to term-structure signal computation) — applies
+    DESIGN.md's roll rule: "roll to the next month's contract 5 trading
+    days before front-month expiry."
+
+    Trading days are approximated via numpy.busday_count (Mon-Fri, no
+    market holiday calendar) — a documented approximation, not exact.
+    This can overstate the true trading-day gap by 0-2 days around a
+    holiday, which only matters right at the roll boundary; given the
+    roll window itself is a 5-day band, not a single trigger day, this
+    approximation is acceptably conservative for v1 rather than pulling
+    in a full market-holiday calendar dependency for a Phase-9 sizing
+    heuristic.
+
+    Returns (contract_expiration, rolled) — `rolled=True` means the
+    calendar front-month was inside the roll window and the next-month
+    contract was used instead.
+    """
+    import numpy as np
+
+    front, nxt, next2 = nearest_unexpired_contracts(as_of, count=3)
+    trading_days_to_front_expiry = int(np.busday_count(as_of, front))
+
+    if trading_days_to_front_expiry <= roll_window_trading_days:
+        return nxt, True
+    return front, False

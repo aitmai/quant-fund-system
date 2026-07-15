@@ -2,6 +2,7 @@ import unittest
 from datetime import date
 
 from src.hedge.vix_futures_calendar import (
+    effective_sizing_contract,
     front_and_next_month_contracts,
     third_friday,
     vix_futures_expiration,
@@ -59,6 +60,33 @@ class TestFrontAndNextMonthContracts(unittest.TestCase):
         front, nxt = front_and_next_month_contracts(as_of)
         self.assertGreater(front, aug_2026_expiration)
         self.assertGreater(nxt, front)
+
+
+class TestEffectiveSizingContract(unittest.TestCase):
+    def test_no_roll_when_outside_window(self):
+        # Confirmed real scenario: 2026-07-14 is 6 TRADING days before
+        # the 2026-07-22 front-month expiry — outside the 5-day window.
+        as_of = date(2026, 7, 14)
+        front = vix_futures_expiration(2026, 7)
+        contract, rolled = effective_sizing_contract(as_of, roll_window_trading_days=5)
+        self.assertEqual(contract, front)
+        self.assertFalse(rolled)
+
+    def test_rolls_to_next_month_inside_window(self):
+        as_of = date(2026, 7, 15)  # 5 trading days before 2026-07-22 expiry
+        front = vix_futures_expiration(2026, 7)
+        next_month = vix_futures_expiration(2026, 8)
+        contract, rolled = effective_sizing_contract(as_of, roll_window_trading_days=5)
+        self.assertEqual(contract, next_month)
+        self.assertTrue(rolled)
+        self.assertNotEqual(contract, front)
+
+    def test_far_from_expiry_never_rolls(self):
+        as_of = date(2026, 7, 1)
+        front = vix_futures_expiration(2026, 7)
+        contract, rolled = effective_sizing_contract(as_of, roll_window_trading_days=5)
+        self.assertEqual(contract, front)
+        self.assertFalse(rolled)
 
 
 if __name__ == "__main__":

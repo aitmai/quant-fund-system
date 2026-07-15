@@ -64,6 +64,7 @@ class TestSelectSpyHedgePut(unittest.TestCase):
         self.assertEqual(result.days_to_expiration, 31)
         self.assertAlmostEqual(abs(result.delta), 0.30, delta=0.02)
         self.assertAlmostEqual(result.premium, 6.36)
+        self.assertAlmostEqual(result.implied_vol, 0.1476)
 
     @patch("src.providers.options_provider.yf.Ticker")
     def test_no_expirations_in_window_raises(self, mock_ticker_cls):

@@ -98,5 +98,23 @@ class TestFetchTermStructure(unittest.TestCase):
         self.assertEqual(snapshot.term_structure_signal, "backwardation")
 
 
+class TestFetchEffectiveSizingQuote(unittest.TestCase):
+    @patch("src.providers.vix_futures_provider.fetch_contract_settle")
+    @patch("src.providers.vix_futures_provider.effective_sizing_contract")
+    def test_uses_effective_contract_and_returns_rolled_flag(self, mock_effective, mock_fetch):
+        mock_effective.return_value = (date(2026, 8, 19), True)
+        mock_fetch.return_value = VixFuturesQuote(
+            date(2026, 8, 19), date(2026, 7, 14), settle=18.73, open_interest=50
+        )
+
+        from src.providers.vix_futures_provider import fetch_effective_sizing_quote
+
+        quote, rolled = fetch_effective_sizing_quote(as_of=date(2026, 7, 15))
+
+        self.assertTrue(rolled)
+        self.assertEqual(quote.contract_expiration, date(2026, 8, 19))
+        mock_fetch.assert_called_once_with(date(2026, 8, 19))
+
+
 if __name__ == "__main__":
     unittest.main()

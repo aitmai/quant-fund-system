@@ -54,7 +54,7 @@ class OptionsProviderError(Exception):
 class SelectedPut:
     """What the daily hedge-sizing job actually needs to write to
     vol_hedge_state: spy_put_strike, spy_put_dte, spy_put_delta,
-    spy_put_premium (DESIGN.md §6.3)."""
+    spy_put_premium, implied_vol (DESIGN.md §6.3)."""
 
     strike: float
     days_to_expiration: int
@@ -62,6 +62,7 @@ class SelectedPut:
     delta: float
     premium: float
     underlying_price: float
+    implied_vol: float
 
 
 def _expirations_in_dte_window(ticker_obj, as_of: date, min_dte: int, max_dte: int) -> List[str]:
@@ -211,4 +212,5 @@ def select_spy_hedge_put(
         delta=delta,
         premium=premium,
         underlying_price=underlying_price,
+        implied_vol=chosen.implied_vol,
     )
