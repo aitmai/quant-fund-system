@@ -12,7 +12,7 @@ requests==2.32.3
 beautifulsoup4==4.12.3
 
 # Data providers
-yfinance==0.2.40
+yfinance==1.5.1
 
 # Modeling (Phase 2/3)
 numpy==1.26.4
@@ -21,5 +21,9 @@ scikit-learn==1.5.0
 scipy==1.13.1
 arch==7.0.0          # GARCH modeling for the hedge sleeve, DESIGN.md §3
 
-# Supabase client (optional — direct psycopg2 to DATABASE_URL also works)
-supabase==2.5.1
+# Supabase client — removed 2026-07-15: never actually imported anywhere in
+# the codebase (everything talks to Postgres directly via psycopg2 — see
+# src/db.py and .env.example). Its `realtime` sub-dependency pinned
+# websockets<13, which hard-conflicted with yfinance==1.5.1's
+# websockets>=13 requirement. Re-add only if something starts actually
+# using the supabase-py client.
