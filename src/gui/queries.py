@@ -387,13 +387,32 @@ def get_upcoming_picks(conn):
 
 def get_signal_vs_execution(conn, limit=50):
     """daily_picks alongside trades for the same ticker/date, surfacing
-    slippage between what the model recommended and what was executed."""
+    slippage between what the model recommended and what was executed.
+
+    Scoped to only the most recent completed risk_sizing run PER
+    trade_date — daily_picks has no run-level dedup (same class of bug
+    found in Stage 4/5's own reads and get_todays_pick — see those for
+    the full story). Found here live (2026-07-15): the user manually
+    triggered the pipeline more than once for the same trade_date while
+    testing, and this table showed every ticker duplicated once per
+    run, all correctly-looking "pending" rows, because nothing here
+    scoped to a single run. Unlike get_todays_pick (which only ever
+    needs "the single latest trade_date"), this table spans MANY
+    historical trade_dates at once, so the fix needs a per-date window
+    function rather than one shared "latest run" subquery."""
     with conn.cursor() as cur:
         cur.execute(
             """
+            WITH latest_run_per_date AS (
+                SELECT dp.trade_date, dp.run_id,
+                       ROW_NUMBER() OVER (PARTITION BY dp.trade_date ORDER BY j.start_time DESC) AS rn
+                FROM (SELECT DISTINCT trade_date, run_id FROM daily_picks) dp
+                JOIN job_runs j ON j.run_id = dp.run_id
+            )
             SELECT dp.ticker, dp.trade_date, dp.dollar_allocated AS signaled_dollars,
                    dp.executed, t.dollar_amount AS executed_dollars, t.price AS executed_price
             FROM daily_picks dp
+            JOIN latest_run_per_date lr ON lr.trade_date = dp.trade_date AND lr.run_id = dp.run_id AND lr.rn = 1
             LEFT JOIN trades t ON t.ticker = dp.ticker AND t.trade_date = dp.trade_date
             ORDER BY dp.trade_date DESC
             LIMIT %s
