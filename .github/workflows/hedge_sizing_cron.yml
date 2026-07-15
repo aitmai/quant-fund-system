@@ -18,15 +18,15 @@ name: daily-hedge-sizing
 on:
   workflow_dispatch: {}
   # schedule:
-  #   # 19:23 UTC, Mon-Fri only = ~3:23pm EDT / ~2:23pm EST — inside US
-  #   # market hours (9:30am-4pm ET) regardless of DST, with buffer before
-  #   # close. Offset from :00 (not "19:00") per price_ingestion_cron.yml's
-  #   # established convention — GitHub recommends avoiding the top of the
-  #   # hour since that's when the most other repos' cron jobs also fire.
-  #   # Weekdays only (unlike ingestion_cron.yml's "every day" choice) —
-  #   # options markets are closed weekends, so a weekend run would just
-  #   # hit the same placeholder-data problem this note warns about.
-  #   - cron: "23 19 * * 1-5"
+  #   # 15:23 UTC, Mon-Fri only = ~11:23am EDT / ~10:23am EST — inside US
+  #   # market hours (9:30am-4pm ET) regardless of DST. Offset from :00
+  #   # (not "15:00") per price_ingestion_cron.yml's established
+  #   # convention — GitHub recommends avoiding the top of the hour since
+  #   # that's when the most other repos' cron jobs also fire. Weekdays
+  #   # only (unlike ingestion_cron.yml's "every day" choice) — options
+  #   # markets are closed weekends, so a weekend run would just hit the
+  #   # placeholder-data problem noted above.
+  #   - cron: "23 15 * * 1-5"
 
 jobs:
   size-hedge:
