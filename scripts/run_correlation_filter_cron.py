@@ -223,6 +223,11 @@ def main():
 
             with conn:
                 with conn.cursor() as cur:
+                    # Delete existing rows for this score_date before
+                    # inserting fresh ones, atomically — same fix as
+                    # run_ml_ranking_cron.py's insert loop; see that
+                    # script's comment for the full story.
+                    cur.execute("DELETE FROM correlation_filtered_shortlist WHERE score_date = %s", (score_date,))
                     for ticker, correlation_flag, sector_cap_flag, excluded_due_to, final_rank in results:
                         cur.execute(
                             """

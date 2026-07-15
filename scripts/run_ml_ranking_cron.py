@@ -100,6 +100,18 @@ def main():
 
             with conn:
                 with conn.cursor() as cur:
+                    # Delete any existing rows for this score_date BEFORE
+                    # inserting fresh ones — within the same transaction,
+                    # so a rerun atomically REPLACES the day's scores
+                    # instead of accumulating a second copy alongside the
+                    # first. Read-side queries already defend against
+                    # this (scoped to "most recent run"), but that only
+                    # papers over duplicates after the fact; this stops
+                    # them from being written at all, which is the real
+                    # fix (found live 2026-07-15 — see run_risk_sizing_cron.py's
+                    # and get_signal_vs_execution's fix notes for the
+                    # full multi-stage story this bug caused).
+                    cur.execute("DELETE FROM ml_rankings WHERE score_date = %s", (score_date,))
                     for row in features.itertuples(index=False):
                         cur.execute(
                             """

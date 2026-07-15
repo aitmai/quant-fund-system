@@ -164,6 +164,21 @@ def main():
 
             with conn:
                 with conn.cursor() as cur:
+                    # Delete existing UNEXECUTED rows for this trade_date
+                    # before inserting fresh ones — same fix pattern as
+                    # Stage 3/4, but deliberately scoped to
+                    # `executed = FALSE`, not an unconditional delete.
+                    # Nothing currently sets daily_picks.executed = TRUE
+                    # (checked 2026-07-15 — no script does yet), but once
+                    # something DOES mark a pick executed after a real
+                    # trade lands, a rerun of this stage for the same
+                    # trade_date must never silently wipe that record.
+                    # An unconditional delete-and-replace would do
+                    # exactly that; this scoped version can't.
+                    cur.execute(
+                        "DELETE FROM daily_picks WHERE trade_date = %s AND executed = FALSE",
+                        (trade_date,),
+                    )
                     for ticker, final_rank, realized_vol, position_size in sized:
                         cur.execute(
                             """
