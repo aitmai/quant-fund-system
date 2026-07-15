@@ -75,19 +75,39 @@ MIN_CORRELATION_HISTORY_DAYS = 30  # below this, correlation isn't computed, sec
 
 
 def _fetch_stage3_shortlist(cur, score_date, limit):
+    # Scoped to the SINGLE most recent completed ml_ranking run for this
+    # score_date — NOT merged across every historical rerun. Discovered
+    # via a live run (2026-07-15): ml_rankings/correlation_filtered_shortlist
+    # have no run-level dedup, so re-running Stage 3 or Stage 4 multiple
+    # times on the same day (as happens routinely while debugging, or
+    # after a retry) accumulates a NEW set of rows per run rather than
+    # replacing the previous run's rows. The old DISTINCT ON query below
+    # merged every historical run's rows together — harmless for Stage 3
+    # itself (a deterministic model scores the same ticker identically
+    # across reruns, so DISTINCT ON's "best score" pick was a no-op in
+    # practice), but the same pattern in Stage 5's read of THIS stage's
+    # output was actively wrong (see run_risk_sizing_cron.py's fix).
+    # Scoping here too for consistency, even though it wasn't visibly
+    # broken — a future non-deterministic model change would silently
+    # reintroduce the same class of bug otherwise.
     cur.execute(
         """
-        SELECT DISTINCT ON (ticker) ticker, p_outperform
+        WITH latest_run AS (
+            SELECT r.run_id
+            FROM ml_rankings r
+            JOIN job_runs j ON j.run_id = r.run_id
+            WHERE r.score_date = %s
+            ORDER BY j.start_time DESC
+            LIMIT 1
+        )
+        SELECT ticker, p_outperform
         FROM ml_rankings
-        WHERE score_date = %s
-        ORDER BY ticker, p_outperform DESC
+        WHERE score_date = %s AND run_id = (SELECT run_id FROM latest_run)
+        ORDER BY p_outperform DESC
         """,
-        (score_date,),
+        (score_date, score_date),
     )
     rows = cur.fetchall()
-    # DISTINCT ON dedupes any same-day re-runs per ticker; now take the
-    # actual top-N by score across the whole shortlist.
-    rows.sort(key=lambda r: r[1], reverse=True)
     return rows[:limit]
 
 

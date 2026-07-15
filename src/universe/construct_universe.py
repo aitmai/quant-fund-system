@@ -72,8 +72,16 @@ def sync_index_universe(
 
     with conn:
         with conn.cursor() as cur:
-            for ticker in to_add:
-                info = fetched[ticker]
+            # Upsert EVERY fetched ticker, not just newly-added ones —
+            # otherwise a ticker that already existed in `universe` before
+            # sector-scraping was added to this function would never get
+            # backfilled, since it's neither new (not in to_add) nor
+            # removed (not in to_remove): the old loop silently skipped
+            # it forever. ON CONFLICT's COALESCE(EXCLUDED.x, universe.x)
+            # only fills in what's currently NULL, so re-running this
+            # against tickers that already have correct data is a no-op —
+            # safe to do unconditionally on every sync.
+            for ticker, info in fetched.items():
                 cur.execute(
                     """
                     INSERT INTO universe (ticker, company_name, sector, exchange, is_active, source, added_date, cik)
@@ -86,6 +94,9 @@ def sync_index_universe(
                     """,
                     (ticker, info.get("company_name"), info.get("sector"), today, info.get("cik")),
                 )
+
+            for ticker in to_add:
+                info = fetched[ticker]
                 cur.execute(
                     """
                     INSERT INTO universe_changes (ticker, change_type, change_date, source_index, detected_by, reason)

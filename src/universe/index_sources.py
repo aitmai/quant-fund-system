@@ -69,9 +69,9 @@ _NON_EQUITY_TICKERS = {"-", "CASH"}
 # Column header text varies slightly across Wikipedia revisions
 # ("Symbol" vs "Ticker symbol", etc.) — match by first hit among candidates
 # rather than pinning to one exact string.
-_SYMBOL_HEADER_CANDIDATES = ("symbol", "ticker symbol", "ticker")
+_SYMBOL_HEADER_CANDIDATES = ("symbol", "tickersymbol", "ticker")
 _NAME_HEADER_CANDIDATES = ("security", "company", "name")
-_SECTOR_HEADER_CANDIDATES = ("gics sector",)  # deliberately NOT "gics sub-industry"
+_SECTOR_HEADER_CANDIDATES = ("gicssector",)  # deliberately NOT "gicssub-industry" — see _normalize_header_text's docstring re: the real header having zero space between "GICS" and "Sector"
 _CIK_HEADER_CANDIDATES = ("cik",)  # SEC's Central Index Key — needed for EDGAR lookups
 
 
@@ -112,8 +112,26 @@ def fetch_sp500_constituents() -> List[Dict]:
         return []
 
 
+def _normalize_header_text(text: str) -> str:
+    """Strips ALL whitespace (not just collapsing runs to one space) and
+    applies NFKC unicode normalization first. Confirmed via a live run
+    (2026-07-15) that Wikipedia's actual header cell renders as
+    "GICSSector" with ZERO space between the two words — "GICS" sits in
+    a separate inline element directly adjacent to "Sector" with no
+    whitespace text node between them, so BeautifulSoup's
+    get_text(strip=True) joins them with nothing in between. A
+    space-collapsing normalize (my first attempt, which assumed a
+    non-breaking space was the culprit) does NOT fix this, since there's
+    no whitespace character there at all to collapse. Stripping ALL
+    whitespace instead means "GICS Sector" (if a future Wikipedia
+    revision adds a space back) and "GICSSector" (today's actual markup)
+    both normalize to the same string and match correctly either way."""
+    import unicodedata
+    return "".join(unicodedata.normalize("NFKC", text).split()).lower()
+
+
 def _find_header_index(headers: List[str], candidates: tuple) -> Optional[int]:
-    lowered = [h.strip().lower() for h in headers]
+    lowered = [_normalize_header_text(h) for h in headers]
     for candidate in candidates:
         for i, h in enumerate(lowered):
             if h == candidate:

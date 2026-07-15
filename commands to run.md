@@ -12,3 +12,11 @@ source .venv/Scripts/activate
 winget install --id GitHub.cli
 
 gh auth login
+
+
+
+# Rerun Stage 3 (rescore today's candidates
+python scripts/run_ml_ranking_cron.py
+
+# Rerun Stage 4 (this is the one that actually uses sector data 
+python scripts/run_correlation_filter_cron.py
