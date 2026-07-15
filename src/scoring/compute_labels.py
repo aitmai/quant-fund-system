@@ -25,13 +25,45 @@ until then.
 """
 
 import os
+import time
 from datetime import date, timedelta
 from typing import Optional
 
 import pandas as pd
+import psycopg2
+from psycopg2.extras import execute_values
 
 HORIZON_TRADING_DAYS = int(os.environ.get("LABEL_HORIZON_TRADING_DAYS", "21"))
 TOP_DECILE_THRESHOLD = float(os.environ.get("LABEL_TOP_DECILE_THRESHOLD", "0.90"))
+
+# Upserts are committed in chunks rather than one giant transaction —
+# a single executemany() across a full multi-year backfill (tens of
+# thousands of rows) can exceed Supabase's pooler statement_timeout,
+# and since it was all one transaction, a timeout rolled back EVERY
+# row, not just the slow tail end. Chunking bounds each transaction's
+# size so a timeout only costs the current chunk, and commits between
+# chunks mean progress survives an interruption — a rerun's LEFT JOIN
+# in _fetch_score_dates_needing_labels() naturally skips whatever
+# already landed.
+UPSERT_CHUNK_SIZE = int(os.environ.get("LABEL_UPSERT_CHUNK_SIZE", "500"))
+
+# Raises statement_timeout for just the current transaction (SET LOCAL
+# is scoped to the transaction, not the connection — safe even when
+# DATABASE_URL points at Supabase's transaction-mode pooler, where the
+# underlying physical connection is shared/reused across clients and a
+# session-level SET would leak). Supabase's pooler otherwise applies a
+# fairly short default statement_timeout that a bulk upsert can exceed
+# even at a modest chunk size, especially with per-row network latency.
+UPSERT_STATEMENT_TIMEOUT_MS = int(os.environ.get("LABEL_UPSERT_STATEMENT_TIMEOUT_MS", "120000"))
+
+# A chunk can fail because the underlying TCP connection silently died
+# (VPN blip, laptop sleep, idle NAT/firewall drop) rather than because
+# the query itself was slow — that shows up server-side as the session
+# sitting "idle in transaction, waiting on ClientRead" forever. Once
+# src.db.get_connection()'s TCP keepalives detect that and raise, retry
+# the SAME chunk on a fresh connection rather than losing the whole run.
+UPSERT_MAX_RETRIES = int(os.environ.get("LABEL_UPSERT_MAX_RETRIES", "3"))
+UPSERT_RETRY_DELAY_SECONDS = int(os.environ.get("LABEL_UPSERT_RETRY_DELAY_SECONDS", "5"))
 
 
 def _fetch_score_dates_needing_labels(conn, horizon: int) -> pd.DataFrame:
@@ -147,17 +179,45 @@ def _upsert_training_labels(conn, df: pd.DataFrame, horizon: int):
         (r.ticker, r.score_date, horizon, float(r.forward_return_pct), int(r.outperform_label))
         for r in df.itertuples(index=False)
     ]
-    with conn:
-        with conn.cursor() as cur:
-            cur.executemany(
-                """
-                INSERT INTO training_labels
-                    (ticker, score_date, horizon_trading_days, forward_return_pct, outperform_label)
-                VALUES (%s, %s, %s, %s, %s)
-                ON CONFLICT (ticker, score_date, horizon_trading_days)
-                DO UPDATE SET forward_return_pct = EXCLUDED.forward_return_pct,
-                              outperform_label = EXCLUDED.outperform_label,
-                              computed_at = NOW()
-                """,
-                rows,
-            )
+
+    insert_sql = """
+        INSERT INTO training_labels
+            (ticker, score_date, horizon_trading_days, forward_return_pct, outperform_label)
+        VALUES %s
+        ON CONFLICT (ticker, score_date, horizon_trading_days)
+        DO UPDATE SET forward_return_pct = EXCLUDED.forward_return_pct,
+                      outperform_label = EXCLUDED.outperform_label,
+                      computed_at = NOW()
+    """
+
+    total = len(rows)
+    for start in range(0, total, UPSERT_CHUNK_SIZE):
+        chunk = rows[start:start + UPSERT_CHUNK_SIZE]
+        attempt = 0
+        while True:
+            try:
+                with conn:
+                    with conn.cursor() as cur:
+                        cur.execute(f"SET LOCAL statement_timeout = '{UPSERT_STATEMENT_TIMEOUT_MS}'")
+                        execute_values(cur, insert_sql, chunk)
+                break
+            except (psycopg2.OperationalError, psycopg2.InterfaceError) as exc:
+                attempt += 1
+                if attempt > UPSERT_MAX_RETRIES:
+                    raise
+                print(
+                    f"  chunk at row {start} lost its connection ({exc.__class__.__name__}: {exc}); "
+                    f"reconnecting and retrying (attempt {attempt}/{UPSERT_MAX_RETRIES})",
+                    flush=True,
+                )
+                try:
+                    conn.close()
+                except Exception:
+                    pass  # connection is already dead; nothing to clean up
+                time.sleep(UPSERT_RETRY_DELAY_SECONDS)
+                from src.db import get_connection
+                conn = get_connection()
+        print(
+            f"  upserted {min(start + UPSERT_CHUNK_SIZE, total)}/{total} training_labels rows",
+            flush=True,
+        )
