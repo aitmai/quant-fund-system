@@ -1,0 +1,53 @@
+# Phase 9 daily hedge sleeve sizing (DESIGN.md §3 "Hedge Sleeve", §13 Phase 9).
+#
+# Deliberately manual-trigger-only for now, NOT scheduled — same pattern as
+# factor_scoring_cron.yml and fundamentals_ingestion_cron.yml for a newly-
+# built module. This has had exactly one successful live-data run so far
+# (2026-07-15, verified end-to-end: roll logic fired correctly, sizing math
+# checked out, put delta -0.2992 vs 0.30 target). Trigger manually a few
+# more times across different days/market conditions, confirm the printed
+# summary looks sensible each time, then uncomment the `schedule:` block.
+#
+# IMPORTANT once scheduled: yfinance's free SPY options endpoint serves
+# placeholder/zeroed bid-ask data outside US market hours (confirmed live
+# 2026-07-15) — the commented cron below is pre-set to run on weekdays
+# during market hours (not an arbitrary overnight slot like the other
+# crons in this repo use) specifically because of that finding.
+name: daily-hedge-sizing
+
+on:
+  workflow_dispatch: {}
+  # schedule:
+  #   # 19:23 UTC, Mon-Fri only = ~3:23pm EDT / ~2:23pm EST — inside US
+  #   # market hours (9:30am-4pm ET) regardless of DST, with buffer before
+  #   # close. Offset from :00 (not "19:00") per price_ingestion_cron.yml's
+  #   # established convention — GitHub recommends avoiding the top of the
+  #   # hour since that's when the most other repos' cron jobs also fire.
+  #   # Weekdays only (unlike ingestion_cron.yml's "every day" choice) —
+  #   # options markets are closed weekends, so a weekend run would just
+  #   # hit the same placeholder-data problem this note warns about.
+  #   - cron: "23 19 * * 1-5"
+
+jobs:
+  size-hedge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run hedge sizing
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          # Not a secret — a placeholder fund size, not sensitive data.
+          # Real NAV replaces this once Phase 7 (Trade Tracking &
+          # Positions) exists; see DESIGN.md §3's Phase 9 implementation
+          # status addendum.
+          HEDGE_SLEEVE_NAV_PLACEHOLDER: "1000000"
+        run: python scripts/run_hedge_sizing_cron.py --triggered-by github-actions
