@@ -10,7 +10,7 @@
       <div class="label" style="font-size:11px;text-transform:uppercase;color:var(--text-dim);letter-spacing:0.06em;">{{ p.data_type }}</div>
       <div style="display:flex;justify-content:space-between;align-items:baseline;margin-top:6px;">
         <span class="mono" style="font-size:18px;">{{ p.complete_count }} / {{ p.total_count }}</span>
-        <span class="hint">{{ p.days_remaining }} day(s) left at current budget</span>
+        <span class="hint">{{ p.days_remaining ~ " day(s) left at current budget" if p.days_remaining is not none else "no daily budget configured" }}</span>
       </div>
       <div class="progress-track">
         <div class="progress-fill" style="width: {{ (p.complete_count / p.total_count * 100) if p.total_count else 0 }}%;"></div>

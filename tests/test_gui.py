@@ -98,6 +98,25 @@ class TestGuiRoutesRender(unittest.TestCase):
         body = self.client.get("/returns").get_data(as_text=True)
         self.assertIn("Insufficient history", body)
 
+    def test_zero_daily_budget_does_not_render_literal_none(self):
+        # CONFIRMED (2026-07-14): queries.get_ingestion_progress() returns
+        # days_remaining=None when daily_budget is 0/unset (ceiling-division
+        # guard). The template had no None-guard, so it would render the
+        # literal text "None day(s) left" on screen for that data_type.
+        import src.gui.queries as q
+        zero_budget_progress = [
+            {"data_type": "fundamentals", "daily_budget": 0, "complete_count": 0,
+             "total_count": 503, "remaining": 503, "days_remaining": None},
+        ]
+        original = q.get_ingestion_progress
+        q.get_ingestion_progress = lambda conn, *a, **kw: zero_budget_progress
+        try:
+            body = self.client.get("/universe").get_data(as_text=True)
+            self.assertNotIn("None day(s)", body)
+            self.assertIn("no daily budget configured", body)
+        finally:
+            q.get_ingestion_progress = original
+
 
 class TestGuiWriteActions(unittest.TestCase):
     def setUp(self):
