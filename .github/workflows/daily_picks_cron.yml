@@ -1,0 +1,81 @@
+# Daily picks pipeline — Stage 3 (ML ranking) -> Stage 4 (correlation +
+# sector-cap filter) -> Stage 5 (risk-parity sizing) — DESIGN.md §3
+# Stages 3-5, §13 Phases 3-5.
+#
+# Sequential steps, not parallel jobs: each stage reads the previous
+# stage's output for TODAY'S score_date, so Stage 4 running against a
+# missing/stale Stage 3 result (or Stage 5 against a missing/stale
+# Stage 4 result) would silently produce nothing meaningful. GitHub
+# Actions steps stop at the first failure by default — exactly the
+# behavior wanted here — so no explicit `if: success()` guards needed.
+#
+# Scheduled to run AFTER daily-factor-scoring (21:50 UTC — see
+# factor_scoring_cron.yml) with enough buffer for that to finish, still
+# landing inside the ~7-8pm EST target window. Same DST caveat as every
+# other scheduled cron in this repo (a fixed UTC time drifts by an hour
+# across DST) — accepted here for the same reason it was accepted
+# elsewhere: the target is "some time in the evening after market
+# close," not a hard boundary, so an hour of drift doesn't matter.
+#
+# Deliberately workflow_dispatch-only for now, NOT scheduled — this
+# chains three modules that were only just built and validated once
+# each against real data (2026-07-15). Trigger manually a few times
+# across different days, confirm each stage's printed summary looks
+# sensible, then uncomment the `schedule:` block — same rollout pattern
+# every other newly-built cron in this repo has followed
+# (factor_scoring_cron.yml, hedge_sizing_cron.yml, etc.)
+name: daily-picks-pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      score_date:
+        description: "Run as of this date (YYYY-MM-DD). Leave blank for today."
+        required: false
+        type: string
+  # schedule:
+  #   - cron: "30 23 * * 1-5"   # 23:30 UTC, Mon-Fri = ~7:30pm EDT / ~6:30pm EST
+
+jobs:
+  generate-daily-picks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Stage 3 — ML ranking
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          if [ -n "${{ github.event.inputs.score_date }}" ]; then
+            python scripts/run_ml_ranking_cron.py --score-date "${{ github.event.inputs.score_date }}" --triggered-by github-actions
+          else
+            python scripts/run_ml_ranking_cron.py --triggered-by github-actions
+          fi
+
+      - name: Stage 4 — Correlation + sector-cap filter
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          if [ -n "${{ github.event.inputs.score_date }}" ]; then
+            python scripts/run_correlation_filter_cron.py --score-date "${{ github.event.inputs.score_date }}" --triggered-by github-actions
+          else
+            python scripts/run_correlation_filter_cron.py --triggered-by github-actions
+          fi
+
+      - name: Stage 5 — Risk-parity sizing
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          if [ -n "${{ github.event.inputs.score_date }}" ]; then
+            python scripts/run_risk_sizing_cron.py --score-date "${{ github.event.inputs.score_date }}" --triggered-by github-actions
+          else
+            python scripts/run_risk_sizing_cron.py --triggered-by github-actions
+          fi
