@@ -1,0 +1,5 @@
+AAPL
+IBM
+STRL
+FIX
+EME

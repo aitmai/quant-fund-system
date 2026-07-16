@@ -23,11 +23,31 @@ candidate for a future lightweight pass, not wired into the daily budget
 math yet.
 """
 
+import re
 import sys
 from datetime import date
 from typing import Dict, Iterable, List, Optional, Set
 
 from . import index_sources
+
+
+def parse_bare_ticker_list(text: str) -> List[str]:
+    """Extracts tickers from raw text that may use one-per-line,
+    comma-separated, or a mix of both — splits on any comma or
+    whitespace run, uppercases, dedupes while preserving first-seen
+    order, and drops empty tokens. Shared by scripts/lookup_ticker_sectors.py
+    and the GUI's bulk-upload route (src/gui/routes.py) so both accept
+    the exact same input formats rather than each parsing it slightly
+    differently."""
+    raw_tokens = re.split(r"[,\s]+", text.strip())
+    seen: Set[str] = set()
+    tickers: List[str] = []
+    for token in raw_tokens:
+        ticker = token.strip().upper()
+        if ticker and ticker not in seen:
+            seen.add(ticker)
+            tickers.append(ticker)
+    return tickers
 
 
 def _fetch_selected_sources(include_sp500: bool, include_russell1000: bool) -> Dict[str, dict]:

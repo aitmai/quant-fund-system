@@ -40,6 +40,19 @@
 </div>
 
 <div class="section card">
+  <h2>Bulk upload tickers</h2>
+  <p class="empty-detail" style="margin-top:-4px;margin-bottom:12px;">
+    Upload a plain .txt file — one ticker per line, comma-separated, or a mix of both.
+    Sector and company name are left blank on upload; run
+    <code>scripts/lookup_ticker_sectors.py</code> against the same file first if you want those filled in automatically.
+  </p>
+  <form method="post" action="{{ url_for('gui.universe_bulk_upload') }}" enctype="multipart/form-data" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+    <input type="file" name="ticker_file" accept=".txt" required>
+    <button class="btn btn-primary" type="submit">Upload</button>
+  </form>
+</div>
+
+<div class="section card">
   <div class="page-header" style="margin-bottom:10px;">
     <h2 style="margin:0;">Universe ({{ tickers|length }} shown)</h2>
     <form method="get" style="display:flex;gap:8px;align-items:center;">

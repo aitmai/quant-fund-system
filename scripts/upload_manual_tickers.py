@@ -30,7 +30,14 @@ def read_csv(path: str):
         reader = csv.DictReader(f)
         for row in reader:
             if row.get("ticker"):
-                yield row
+                # Blank CSV cells come back as "" from csv.DictReader, not
+                # None — left as-is, that would flow into
+                # upload_manual_tickers()'s COALESCE(EXCLUDED.x, universe.x)
+                # as a non-null empty string, silently OVERWRITING any
+                # existing good company_name/sector/exchange with blank.
+                # Converting "" -> None here lets COALESCE actually do its
+                # job: preserve existing data when a column is blank.
+                yield {k: (v if v else None) for k, v in row.items()}
 
 
 def main() -> int:

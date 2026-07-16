@@ -28,6 +28,7 @@ from datetime import date, datetime
 from flask import Blueprint, flash, g, redirect, render_template, request, url_for
 
 from src.gui import queries
+from src.universe.construct_universe import parse_bare_ticker_list, upload_manual_tickers
 from src.gui.db import DatabaseUnavailable, get_db_connection
 from src.job_run import JobRun
 
@@ -118,6 +119,47 @@ def universe_add():
         conn, ticker, request.form.get("company_name"), request.form.get("sector")
     )
     flash(f"Added {ticker.strip().upper()} to the universe.", "success")
+    return redirect(url_for("gui.universe"))
+
+
+@gui_bp.route("/universe/bulk-upload", methods=["POST"])
+def universe_bulk_upload():
+    """Bulk ticker upload from a plain .txt file — one ticker per line
+    and/or comma-separated, both accepted (parse_bare_ticker_list
+    handles either). Deliberately does NOT do inline sector/company-name
+    enrichment here (that would mean a synchronous yfinance call per
+    ticker inside an HTTP request — slow, and risks Render's request
+    timeout on a large list). Tickers land with is_active=TRUE,
+    source='manual', sector/company_name left NULL — the same "cheap
+    metadata write only, no fetch triggered inline" rule this file's
+    module docstring already establishes for the single-ticker add
+    route. Enriching sector afterward is a deliberate separate CLI step
+    (scripts/lookup_ticker_sectors.py -> scripts/upload_manual_tickers.py),
+    not squeezed into this request."""
+    conn = get_db()
+    uploaded_file = request.files.get("ticker_file")
+    if not uploaded_file or not uploaded_file.filename:
+        flash("Choose a .txt file of tickers to upload.", "error")
+        return redirect(url_for("gui.universe"))
+
+    try:
+        text = uploaded_file.read().decode("utf-8")
+    except UnicodeDecodeError:
+        flash("Could not read that file as text — make sure it's a plain .txt file.", "error")
+        return redirect(url_for("gui.universe"))
+
+    tickers = parse_bare_ticker_list(text)
+    if not tickers:
+        flash("No tickers found in that file.", "error")
+        return redirect(url_for("gui.universe"))
+
+    result = upload_manual_tickers(conn, [{"ticker": t} for t in tickers], run_type="manual", triggered_by="gui")
+    flash(
+        f"Uploaded {result['added']} ticker(s) from {uploaded_file.filename}. "
+        f"Sector/company name left blank — run scripts/lookup_ticker_sectors.py "
+        f"to enrich them.",
+        "success",
+    )
     return redirect(url_for("gui.universe"))
 
 
