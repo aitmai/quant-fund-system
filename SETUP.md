@@ -45,7 +45,7 @@ row with `stage='phase0_scaffolding'`. That's the entire Phase 0 milestone.
 
 You can also run it locally first to debug faster:
 ```bash
-python -m venv .venv && source .venv/bin/activate
+python -m venv venv && source venv/Scripts/activate   # Windows Git Bash; use venv/bin/activate on Mac/Linux
 pip install -r requirements.txt
 cp .env.example .env   # then fill in real values, never commit this file
 export $(grep -v '^#' .env | xargs)

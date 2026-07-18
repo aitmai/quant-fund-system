@@ -6,7 +6,7 @@ python scripts/run_factor_scoring_cron.py --manual --triggered-by aitmai
 python -m venv venv
 
 # Activate
-source .venv/Scripts/activate
+source venv/Scripts/activate
 
 # GitHub CLI)
 winget install --id GitHub.cli
