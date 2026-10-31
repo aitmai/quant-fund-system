@@ -21,18 +21,81 @@ import pandas as pd
 PRICE_LOOKBACK_DAYS = 400
 
 
-def fetch_active_universe(conn) -> pd.DataFrame:
-    """Returns a DataFrame of {ticker, sector} for every active ticker.
-    Sector is required for sector-relative z-scoring — tickers with a
-    NULL sector (shouldn't normally happen for Wikipedia-sourced S&P 500
-    rows, but possible for manually-added ones without one supplied)
-    fall into a literal 'Unknown' bucket rather than being silently
-    dropped, so they still get scored, just within a smaller group."""
+def fetch_active_universe(conn, as_of: Optional[date] = None) -> pd.DataFrame:
+    """Return current or reconstructed historical universe membership.
+
+    Historical membership uses the latest preceding transition, then
+    the earliest subsequent transition, then current state for tickers
+    with no recorded transitions.
+
+    This assumes the transition log is complete over the relevant
+    period. Current sector labels are not historical snapshots.
+    """
+    if as_of is None:
+        query = """
+            SELECT ticker, sector
+            FROM universe
+            WHERE is_active = TRUE
+        """
+        params = ()
+    else:
+        query = """
+            WITH past_ranked AS (
+                SELECT ticker, change_type,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY ticker
+                           ORDER BY change_date DESC, id DESC
+                       ) AS rn
+                FROM universe_changes
+                WHERE change_date <= %s
+            ),
+            future_ranked AS (
+                SELECT ticker, change_type,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY ticker
+                           ORDER BY change_date ASC, id ASC
+                       ) AS rn
+                FROM universe_changes
+                WHERE change_date > %s
+            ),
+            coverage AS (
+                SELECT MIN(change_date) AS first_event_date
+                FROM universe_changes
+            )
+            SELECT u.ticker, u.sector
+            FROM universe AS u
+            CROSS JOIN coverage AS c
+            LEFT JOIN past_ranked AS p
+                ON p.ticker = u.ticker AND p.rn = 1
+            LEFT JOIN future_ranked AS f
+                ON f.ticker = u.ticker AND f.rn = 1
+            WHERE c.first_event_date <= %s
+              AND u.added_date <= %s
+              AND CASE
+                  WHEN p.ticker IS NOT NULL
+                      THEN p.change_type = 'added'
+                  WHEN f.ticker IS NOT NULL
+                      THEN f.change_type = 'removed'
+                  ELSE u.is_active = TRUE
+              END
+            ORDER BY u.ticker
+        """
+        params = (as_of, as_of, as_of, as_of)
+
     with conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT ticker, sector FROM universe WHERE is_active = TRUE")
+            cur.execute(query, params)
             rows = cur.fetchall()
+
     df = pd.DataFrame(rows, columns=["ticker", "sector"])
+
+    if as_of is not None and df.empty:
+        raise ValueError(
+            f"No recorded universe membership as of {as_of}. "
+            "The event ledger may not cover this date; "
+            "refusing a misleading historical run."
+        )
+
     df["sector"] = df["sector"].fillna("Unknown")
     return df
 
