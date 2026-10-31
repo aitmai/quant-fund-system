@@ -35,9 +35,10 @@ from .zscore import average_available_zscores, sector_zscore
 
 
 def run(conn, job=None, score_date=None) -> dict:
+    requested_score_date = score_date
     score_date = score_date or date.today()
 
-    universe_df = data_fetch.fetch_active_universe(conn)
+    universe_df = data_fetch.fetch_active_universe(conn, as_of=requested_score_date)
     total_active = len(universe_df)
     sector_map: Dict[str, str] = dict(zip(universe_df["ticker"], universe_df["sector"]))
 
@@ -50,6 +51,10 @@ def run(conn, job=None, score_date=None) -> dict:
 
     price_panel = data_fetch.fetch_price_panel(conn, as_of=score_date)
     fundamentals_panel = data_fetch.fetch_latest_fundamentals(conn, as_of=score_date)
+    # Only as-of eligible names may influence peer-relative normalization.
+    eligible = set(universe_df["ticker"])
+    price_panel = price_panel[price_panel["ticker"].isin(eligible)]
+    fundamentals_panel = fundamentals_panel[fundamentals_panel["ticker"].isin(eligible)]
 
     momentum_raw, lowvol_raw, momentum_skipped, lowvol_skipped = compute_momentum_and_lowvol(price_panel)
     quality_sub_raw, value_sub_raw = compute_quality_value_raw(fundamentals_panel)
